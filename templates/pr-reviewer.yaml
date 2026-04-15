@@ -1,0 +1,86 @@
+# PR Reviewer Routine
+#
+# Runs automatically when a pull request is opened or updated.
+# Configured via the web UI at claude.ai/code/routines with a
+# GitHub trigger. This template defines the routine's instructions
+# and filter settings.
+#
+# Trigger type: GitHub (not API)
+# Beta header: experimental-cc-routine-2026-04-01
+
+routine:
+  name: pr-reviewer
+  description: >
+    Bespoke code review that runs the team's checklist on every PR.
+    Posts a structured review comment with pass/fail for each item.
+  trigger: github
+  events:
+    - pull_request.opened
+    - pull_request.synchronize
+
+  filters:
+    base_branch:
+      include:
+        - main
+        - develop
+    author:
+      exclude:
+        - "dependabot[bot]"
+        - "renovate[bot]"
+    paths:
+      include:
+        - "src/**"
+        - "lib/**"
+        - "api/**"
+      exclude:
+        - "*.md"
+        - "docs/**"
+        - "*.yml"
+        - ".github/**"
+
+  branch_safety:
+    prefix: "claude/"
+    auto_create_pr: false  # Review only, no code changes
+
+  instructions: |
+    You are reviewing a pull request. Follow the team's code review checklist.
+
+    ## Review Checklist
+
+    ### Security
+    - No hardcoded secrets, API keys, or credentials
+    - User input is validated and sanitized
+    - SQL queries use parameterized statements
+    - Authentication and authorization checks are present where needed
+
+    ### Error Handling
+    - All async operations have error handling
+    - Error messages do not leak internal details to users
+    - Failed operations clean up resources (connections, file handles)
+
+    ### Performance
+    - No N+1 query patterns in database access
+    - Large result sets use pagination
+    - Expensive computations are cached where appropriate
+
+    ### Testing
+    - New code has corresponding test coverage
+    - Edge cases are covered (empty input, null values, boundary conditions)
+    - Tests are deterministic with no timing-dependent assertions
+
+    ### Code Quality
+    - Function and variable names are descriptive
+    - No commented-out code left behind
+    - Complex logic has explanatory comments
+    - No duplicated code that should be extracted into a shared function
+
+    ## Output Format
+
+    Post a single PR review comment with:
+    1. Summary of what the PR does (2-3 sentences)
+    2. The checklist above with each item marked PASS, FAIL, or N/A
+    3. Specific findings with file names and line numbers
+    4. Overall recommendation: APPROVE, REQUEST_CHANGES, or COMMENT
+
+    Be constructive and specific. Reference exact file paths and line numbers
+    for every finding.

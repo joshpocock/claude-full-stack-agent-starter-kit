@@ -1,0 +1,50 @@
+# Nightly Triage Routine
+#
+# Fires nightly to pull open issues, categorize them, and post
+# a summary to Slack. Configure the trigger_id and schedule at
+# claude.ai/code/routines, then use this template as the
+# routine's instructions.
+#
+# API: POST /v1/claude_code/routines/{trigger_id}/fire
+# Beta header: experimental-cc-routine-2026-04-01
+
+routine:
+  name: nightly-triage
+  description: >
+    Pulls open issues from the project tracker, labels them by priority
+    and category, and posts an actionable summary to Slack each morning.
+  trigger: scheduled
+  schedule: "0 2 * * *"  # 2:00 AM UTC daily
+
+  instructions: |
+    You are a project triage assistant. When triggered:
+
+    1. Pull all open issues from the project tracker (Linear, GitHub Issues, or Jira).
+    2. For each issue, assign a priority label:
+       - critical: Production outage, data loss, security vulnerability
+       - high: Major feature blocker, significant performance regression
+       - medium: Bug with workaround, feature request with multiple upvotes
+       - low: Minor UI issue, documentation fix, nice-to-have improvement
+    3. For each issue, assign a category label:
+       - bug, feature, improvement, documentation, infrastructure, testing
+    4. Generate a triage summary with:
+       - Total open issues (and change from yesterday)
+       - Breakdown by priority
+       - Top 5 issues that need immediate attention
+       - Issues that have been open for more than 7 days without activity
+       - Suggested assignments based on recent contributor activity
+    5. Write the summary to /workspace/triage-summary.md
+    6. Post the summary to the configured Slack channel
+
+    Be concise and actionable. The team reads this at standup.
+
+  # Environment variables the routine needs access to
+  required_env:
+    - SLACK_WEBHOOK_URL
+    - LINEAR_API_KEY  # or GITHUB_TOKEN, depending on your tracker
+
+  # Example text payload sent when firing via API
+  example_payload: |
+    Run nightly triage for 2026-04-13.
+    Focus on the backend-api and auth-service projects.
+    Flag anything related to the upcoming v2.0 release.
