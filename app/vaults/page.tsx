@@ -46,7 +46,11 @@ export default function VaultsPage() {
           let credentials: Credential[] = [];
           try {
             const cRes = await fetch(`/api/vaults/${v.id}/credentials`);
-            if (cRes.ok) credentials = await cRes.json();
+            if (cRes.ok) {
+              const cData = await cRes.json();
+              // Handle paginated response or direct array
+              credentials = Array.isArray(cData) ? cData : (cData?.data ?? []);
+            }
           } catch { /* ignore */ }
           return { ...v, credentials, expanded: false };
         })
@@ -238,13 +242,13 @@ export default function VaultsPage() {
                     padding: "16px 20px",
                   }}
                 >
-                  {vault.credentials.length === 0 ? (
+                  {(!Array.isArray(vault.credentials) || vault.credentials.length === 0) ? (
                     <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 12 }}>
                       No credentials in this vault.
                     </p>
                   ) : (
                     <div style={{ marginBottom: 12 }}>
-                      {vault.credentials.map((cred) => (
+                      {(Array.isArray(vault.credentials) ? vault.credentials : []).map((cred) => (
                         <div
                           key={cred.id}
                           style={{
