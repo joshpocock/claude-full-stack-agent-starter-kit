@@ -12,8 +12,6 @@ import {
   Server,
   Shield,
   Package,
-  Moon,
-  Sun,
   Menu,
   X,
   Sparkles,
@@ -22,7 +20,6 @@ import {
   Zap,
   BarChart3,
 } from "lucide-react";
-import { useTheme } from "./ThemeProvider";
 import { useCommandPalette } from "./CommandPalette";
 
 const navItems = [
@@ -42,7 +39,6 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { theme, toggleTheme } = useTheme();
   const { setOpen: setCommandPaletteOpen } = useCommandPalette();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -292,42 +288,8 @@ export default function Sidebar() {
           </button>
         </div>
 
-        {/* Theme Toggle */}
-        <div
-          style={{
-            padding: "12px 16px",
-            borderTop: "1px solid var(--border-color)",
-          }}
-        >
-          <button
-            onClick={toggleTheme}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              width: "100%",
-              padding: "9px 12px",
-              background: "var(--bg-card)",
-              border: "1px solid var(--border-color)",
-              borderRadius: 6,
-              color: "var(--text-secondary)",
-              fontSize: 13,
-              cursor: "pointer",
-              transition: "background 0.15s ease",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background =
-                "var(--bg-hover)";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background =
-                "var(--bg-card)";
-            }}
-          >
-            {theme === "dark" ? <Moon size={16} /> : <Sun size={16} />}
-            <span>{theme === "dark" ? "Dark Mode" : "Light Mode"}</span>
-          </button>
-        </div>
+        {/* Spacer to push search to bottom */}
+        <div style={{ padding: "12px 16px 16px" }} />
       </nav>
     </>
   );

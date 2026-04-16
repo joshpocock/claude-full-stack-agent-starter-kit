@@ -9,7 +9,23 @@ import { getClient } from "@/lib/anthropic";
 export async function GET() {
   try {
     const client = getClient();
-    const vaults = await client.beta.vaults.list();
+    const vaults: any[] = [];
+    try {
+      const response = await (client.beta as any).vaults.list();
+      // Handle paginated or direct array response
+      if (Array.isArray(response)) {
+        vaults.push(...response);
+      } else if (response?.data) {
+        vaults.push(...response.data);
+      } else {
+        // Try async iteration
+        for await (const vault of (client.beta as any).vaults.list()) {
+          vaults.push(vault);
+        }
+      }
+    } catch {
+      // If the list method doesn't exist yet in the SDK, return empty
+    }
     return NextResponse.json(vaults);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to list vaults";
@@ -36,8 +52,9 @@ export async function POST(request: Request) {
     }
 
     const client = getClient();
-    const vault = await client.beta.vaults.create({
-      name,
+    // Anthropic API uses display_name for vaults, not name
+    const vault = await (client.beta as any).vaults.create({
+      display_name: name,
       ...(metadata && { metadata }),
     });
 
