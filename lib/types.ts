@@ -27,12 +27,39 @@ export interface McpServer {
   [key: string]: unknown;
 }
 
+export type PackageManager = "apt" | "cargo" | "gem" | "go" | "npm" | "pip";
+
+export interface EnvironmentPackages {
+  apt?: string[];
+  cargo?: string[];
+  gem?: string[];
+  go?: string[];
+  npm?: string[];
+  pip?: string[];
+}
+
+export interface EnvironmentNetworking {
+  type: "unrestricted" | "limited";
+  allow_mcp_servers?: boolean;
+  allow_package_managers?: boolean;
+  allowed_hosts?: string[];
+}
+
+export interface EnvironmentConfig {
+  type: "cloud";
+  networking?: EnvironmentNetworking;
+  packages?: EnvironmentPackages;
+}
+
 export interface Environment {
   id: string;
   name: string;
-  setup_commands?: string[];
-  network_access?: boolean;
+  description?: string;
+  config?: EnvironmentConfig;
+  metadata?: Record<string, string>;
   created_at?: string;
+  updated_at?: string;
+  archived_at?: string | null;
 }
 
 export interface Session {

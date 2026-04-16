@@ -22,16 +22,19 @@ export async function GET() {
 
 /**
  * POST /api/environments
- * Create a new sandbox environment.
+ * Create a new cloud sandbox environment using the Managed Agents API.
  *
- * Body: { name, setup_commands?, network_access? }
- * setup_commands is an array of shell commands to run during environment setup
- * (e.g. installing packages).
+ * Body: {
+ *   name: string,
+ *   description?: string,
+ *   config?: { type: "cloud", networking?, packages? },
+ *   metadata?: Record<string, string>
+ * }
  */
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { name, setup_commands, network_access } = body;
+    const { name, description, config, metadata } = body;
 
     if (!name) {
       return NextResponse.json(
@@ -41,11 +44,11 @@ export async function POST(request: Request) {
     }
 
     const client = getClient();
-    // Anthropic API uses display_name for environments
-    const environment = await (client.beta as any).environments.create({
-      display_name: name,
-      ...(setup_commands && { setup_commands }),
-      ...(network_access !== undefined && { network_access }),
+    const environment = await client.beta.environments.create({
+      name,
+      ...(description && { description }),
+      ...(config && { config }),
+      ...(metadata && Object.keys(metadata).length > 0 && { metadata }),
     });
 
     return NextResponse.json(environment, { status: 201 });

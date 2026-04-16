@@ -377,40 +377,63 @@ export async function GET() {
       // SQLite not available or table doesn't exist yet
     }
 
-    // Try to fetch Anthropic official skills from the Skills API
+    // Fetch official Anthropic skills from github.com/anthropics/skills
     let anthropicSkills: BundledSkill[] = [];
     try {
-      const apiKey = process.env.ANTHROPIC_API_KEY;
-      if (apiKey) {
-        const res = await fetch("https://api.anthropic.com/v1/skills", {
-          headers: {
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "managed-agents-2026-04-01",
-          },
-        });
+      const listRes = await fetch(
+        "https://api.github.com/repos/anthropics/skills/contents/skills",
+        { headers: { Accept: "application/vnd.github.v3+json" }, next: { revalidate: 3600 } }
+      );
 
-        if (res.ok) {
-          const data = await res.json();
-          const skills = Array.isArray(data) ? data : data?.data ?? [];
+      if (listRes.ok) {
+        const skillDirs = await listRes.json();
+        if (Array.isArray(skillDirs)) {
+          // Fetch SKILL.md for each skill in parallel (cap to avoid rate limits)
+          const skillPromises = skillDirs
+            .filter((d: any) => d.type === "dir")
+            .slice(0, 20)
+            .map(async (dir: any) => {
+              const skillName = dir.name;
+              const rawUrl = `https://raw.githubusercontent.com/anthropics/skills/main/skills/${skillName}/SKILL.md`;
+              try {
+                const contentRes = await fetch(rawUrl, { next: { revalidate: 3600 } });
+                if (!contentRes.ok) return null;
+                const content = await contentRes.text();
 
-          anthropicSkills = skills.map((skill: Record<string, unknown>) => ({
-            id: `anthropic-${skill.id}`,
-            name: (skill.name as string) || (skill.id as string),
-            description: (skill.description as string) || "",
-            author: "Anthropic",
-            source: "anthropic" as const,
-            category: "Official",
-            content:
-              (skill.content as string) ||
-              (skill.instructions as string) ||
-              JSON.stringify(skill, null, 2),
-            anthropic_skill_id: skill.id as string,
-          }));
+                // Extract description from YAML frontmatter or first paragraph
+                let description = "";
+                const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+                if (fmMatch) {
+                  const descMatch = fmMatch[1].match(/description:\s*(.+)/);
+                  if (descMatch) description = descMatch[1].trim().replace(/^['"]|['"]$/g, "");
+                }
+                if (!description) {
+                  const lines = content.split("\n").filter((l) => l.trim() && !l.startsWith("#") && !l.startsWith("---"));
+                  if (lines[0]) description = lines[0].trim().substring(0, 200);
+                }
+
+                const displayName = skillName.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+
+                return {
+                  id: `anthropic-${skillName}`,
+                  name: displayName,
+                  description: description || `Official Anthropic skill: ${displayName}`,
+                  author: "Anthropic",
+                  source: "anthropic" as const,
+                  category: "Official",
+                  content,
+                };
+              } catch {
+                return null;
+              }
+            });
+
+          const results = await Promise.all(skillPromises);
+          anthropicSkills = results.filter((s): s is BundledSkill => s !== null);
         }
       }
     } catch {
-      // Skills API might not be available yet, fall back to bundled only
+      // GitHub unavailable, fall back to bundled only
     }
 
     return NextResponse.json([

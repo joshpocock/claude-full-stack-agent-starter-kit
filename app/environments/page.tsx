@@ -70,37 +70,66 @@ export default function EnvironmentsPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>Setup Commands</th>
+                <th>Hosting</th>
                 <th>Network</th>
+                <th>Packages</th>
                 <th>Created</th>
               </tr>
             </thead>
             <tbody>
-              {environments.map((env) => (
-                <tr key={env.id}>
-                  <td style={{ fontWeight: 500 }}>{env.name}</td>
-                  <td style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-                    {env.setup_commands && env.setup_commands.length > 0
-                      ? `${env.setup_commands.length} command${env.setup_commands.length > 1 ? "s" : ""}`
-                      : "-"}
-                  </td>
-                  <td>
-                    <span
-                      style={{
-                        color: env.network_access ? "var(--success)" : "var(--text-muted)",
-                        fontSize: 13,
-                      }}
-                    >
-                      {env.network_access ? "Enabled" : "Disabled"}
-                    </span>
-                  </td>
-                  <td style={{ color: "var(--text-muted)", fontSize: 13 }}>
-                    {env.created_at
-                      ? new Date(env.created_at).toLocaleDateString()
-                      : "-"}
-                  </td>
-                </tr>
-              ))}
+              {environments.map((env) => {
+                const networking = env.config?.networking;
+                const pkgs = env.config?.packages;
+                const pkgCount = pkgs
+                  ? (pkgs.apt?.length ?? 0) +
+                    (pkgs.cargo?.length ?? 0) +
+                    (pkgs.gem?.length ?? 0) +
+                    (pkgs.go?.length ?? 0) +
+                    (pkgs.npm?.length ?? 0) +
+                    (pkgs.pip?.length ?? 0)
+                  : 0;
+                return (
+                  <tr key={env.id}>
+                    <td style={{ fontWeight: 500 }}>{env.name}</td>
+                    <td style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                      <span
+                        style={{
+                          display: "inline-block",
+                          padding: "2px 8px",
+                          background: "var(--bg-badge)",
+                          border: "1px solid var(--border-color)",
+                          borderRadius: 6,
+                          fontSize: 12,
+                        }}
+                      >
+                        {env.config?.type === "cloud" ? "Cloud" : "Cloud"}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 13, textTransform: "capitalize" }}>
+                      <span
+                        style={{
+                          color:
+                            networking?.type === "unrestricted"
+                              ? "var(--success)"
+                              : "var(--text-secondary)",
+                        }}
+                      >
+                        {networking?.type ?? "Limited"}
+                      </span>
+                    </td>
+                    <td style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                      {pkgCount > 0
+                        ? `${pkgCount} package${pkgCount > 1 ? "s" : ""}`
+                        : "-"}
+                    </td>
+                    <td style={{ color: "var(--text-muted)", fontSize: 13 }}>
+                      {env.created_at
+                        ? new Date(env.created_at).toLocaleDateString()
+                        : "-"}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
