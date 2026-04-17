@@ -59,9 +59,59 @@ export function getDb(): Database.Database {
         last_session_url TEXT,
         created_at TEXT DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE IF NOT EXISTS routine_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        routine_id INTEGER NOT NULL,
+        routine_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'success',
+        session_id TEXT,
+        session_url TEXT,
+        error TEXT,
+        fired_at TEXT DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
     `);
   }
   return db;
+}
+
+// ---------------------------------------------------------------------------
+// App settings helpers
+// ---------------------------------------------------------------------------
+
+export function getSetting(key: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT value FROM app_settings WHERE key = ?")
+    .get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+    )
+    .run(key, value);
+}
+
+export function deleteSetting(key: string): void {
+  getDb().prepare("DELETE FROM app_settings WHERE key = ?").run(key);
+}
+
+export function getAllSettings(): Record<string, string> {
+  const rows = getDb()
+    .prepare("SELECT key, value FROM app_settings")
+    .all() as Array<{ key: string; value: string }>;
+  const result: Record<string, string> = {};
+  for (const row of rows) result[row.key] = row.value;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +143,25 @@ export function insertChatSession(session: {
        VALUES (@chat_id, @agent_id, @environment_id, @session_id)`
     )
     .run(session);
+}
+
+/**
+ * Return all chat sessions, ordered newest first.
+ */
+export function getAllChatSessions(): ChatSession[] {
+  return getDb()
+    .prepare("SELECT * FROM chat_sessions ORDER BY created_at DESC")
+    .all() as ChatSession[];
+}
+
+/**
+ * Delete a chat session by chat_id.
+ */
+export function deleteChatSession(chatId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM chat_sessions WHERE chat_id = ?")
+    .run(chatId);
+  return result.changes > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,4 +367,76 @@ export function deleteRoutine(id: number): boolean {
     .prepare("DELETE FROM routines WHERE id = ?")
     .run(id);
   return result.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Routine run tracking
+// ---------------------------------------------------------------------------
+
+export interface RoutineRun {
+  id: number;
+  routine_id: number;
+  routine_name: string;
+  status: "success" | "error";
+  session_id: string | null;
+  session_url: string | null;
+  error: string | null;
+  fired_at: string;
+}
+
+export function logRoutineRun(run: {
+  routine_id: number;
+  routine_name: string;
+  status: "success" | "error";
+  session_id?: string;
+  session_url?: string;
+  error?: string;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO routine_runs (routine_id, routine_name, status, session_id, session_url, error)
+       VALUES (@routine_id, @routine_name, @status, @session_id, @session_url, @error)`
+    )
+    .run({
+      routine_id: run.routine_id,
+      routine_name: run.routine_name,
+      status: run.status,
+      session_id: run.session_id ?? null,
+      session_url: run.session_url ?? null,
+      error: run.error ?? null,
+    });
+}
+
+export function getRoutineRuns(opts?: {
+  routineId?: number;
+  since?: string;
+  limit?: number;
+}): RoutineRun[] {
+  let sql = "SELECT * FROM routine_runs WHERE 1=1";
+  const params: Record<string, unknown> = {};
+
+  if (opts?.routineId) {
+    sql += " AND routine_id = @routine_id";
+    params.routine_id = opts.routineId;
+  }
+  if (opts?.since) {
+    sql += " AND fired_at >= @since";
+    params.since = opts.since;
+  }
+  sql += " ORDER BY fired_at DESC";
+  if (opts?.limit) {
+    sql += ` LIMIT ${opts.limit}`;
+  }
+
+  return getDb().prepare(sql).all(params) as RoutineRun[];
+}
+
+export function getTodayRunCount(): number {
+  const today = new Date().toISOString().split("T")[0];
+  const row = getDb()
+    .prepare(
+      "SELECT COUNT(*) as count FROM routine_runs WHERE fired_at >= @today"
+    )
+    .get({ today: `${today}T00:00:00` }) as { count: number };
+  return row?.count ?? 0;
 }

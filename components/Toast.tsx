@@ -15,10 +15,11 @@ interface Toast {
   id: number;
   type: ToastType;
   message: string;
+  action?: { label: string; href: string };
 }
 
 interface ToastContextType {
-  showToast: (message: string, type?: ToastType) => void;
+  showToast: (message: string, type?: ToastType, action?: { label: string; href: string }) => void;
 }
 
 const ToastContext = createContext<ToastContextType>({
@@ -34,13 +35,16 @@ let toastId = 0;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const showToast = useCallback((message: string, type: ToastType = "info") => {
-    const id = ++toastId;
-    setToasts((prev) => [...prev, { id, type, message }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 3000);
-  }, []);
+  const showToast = useCallback(
+    (message: string, type: ToastType = "info", action?: { label: string; href: string }) => {
+      const id = ++toastId;
+      setToasts((prev) => [...prev, { id, type, message, action }]);
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, action ? 8000 : 3000);
+    },
+    []
+  );
 
   const iconMap = {
     success: CheckCircle,
@@ -57,7 +61,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ showToast }}>
       {children}
-      {/* Toast container */}
       <div
         style={{
           position: "fixed",
@@ -89,10 +92,34 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 pointerEvents: "auto",
                 animation: "toast-slide-in 0.25s ease-out",
                 minWidth: 240,
+                maxWidth: 380,
               }}
             >
-              <Icon size={18} color={colorMap[toast.type]} />
-              <span>{toast.message}</span>
+              <Icon
+                size={18}
+                color={colorMap[toast.type]}
+                style={{ flexShrink: 0 }}
+              />
+              <span style={{ flex: 1 }}>{toast.message}</span>
+              {toast.action && (
+                <a
+                  href={toast.action.href}
+                  style={{
+                    flexShrink: 0,
+                    padding: "4px 10px",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--accent)",
+                    background: "var(--accent-subtle)",
+                    border: "1px solid var(--accent)",
+                    borderRadius: 6,
+                    textDecoration: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  {toast.action.label}
+                </a>
+              )}
             </div>
           );
         })}

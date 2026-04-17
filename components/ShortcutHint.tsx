@@ -20,7 +20,7 @@ export default function ShortcutHint({ keys }: ShortcutHintProps) {
         fontSize: 11,
         fontFamily: "monospace",
         fontWeight: 500,
-        color: "var(--text-muted)",
+        color: "#FFFFFF",
         lineHeight: 1,
         flexShrink: 0,
       }}

@@ -1,25 +1,16 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import AgentForm, { type AgentFormData } from "@/components/AgentForm";
+import AgentEditor, { type AgentConfig } from "@/components/AgentEditor";
 
 export default function NewAgentPage() {
   const router = useRouter();
 
-  const handleSubmit = async (data: AgentFormData) => {
-    const body = {
-      name: data.name,
-      description: data.description || undefined,
-      model: data.model,
-      system: data.system || undefined,
-      tools: data.tools.map((t) => ({ type: t })),
-      mcp_servers: data.mcp_servers.length > 0 ? data.mcp_servers : undefined,
-    };
-
+  const handleSubmit = async (config: AgentConfig) => {
     const res = await fetch("/api/agents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(config),
     });
 
     if (!res.ok) {
@@ -32,9 +23,9 @@ export default function NewAgentPage() {
   };
 
   return (
-    <div style={{ maxWidth: 640 }}>
+    <div style={{ maxWidth: 720 }}>
       <div className="card">
-        <AgentForm onSubmit={handleSubmit} submitLabel="Create Agent" />
+        <AgentEditor onSubmit={handleSubmit} submitLabel="Create Agent" />
       </div>
     </div>
   );

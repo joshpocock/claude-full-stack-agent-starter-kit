@@ -53,28 +53,19 @@ export async function GET(
       : Date.now();
     const sessionModel = (session.model as string) || "claude-sonnet-4-6";
 
-    // Get all events
-    let rawEvents: Array<Record<string, unknown>> = [];
+    // Get all events via the paginated events API
+    const rawEvents: Array<Record<string, unknown>> = [];
     try {
-      // @ts-expect-error - list_events may not be in current SDK type defs
-      const eventsRes = await client.beta.sessions.list_events(id, {});
-      rawEvents = Array.isArray(eventsRes)
-        ? eventsRes
-        : (eventsRes as unknown as { data?: Array<Record<string, unknown>> }).data || [];
+      const page = (await (client.beta as any).sessions.events.list(id, {})) as any;
+      if (Array.isArray(page?.data)) {
+        rawEvents.push(...page.data);
+      } else if (page && typeof page[Symbol.asyncIterator] === "function") {
+        for await (const ev of page as AsyncIterable<Record<string, unknown>>) {
+          rawEvents.push(ev);
+        }
+      }
     } catch {
-      // If list_events is not available, try listing messages as fallback
-      // @ts-expect-error - list_messages may not be in current SDK type defs
-      const messagesRes = await client.beta.sessions.list_messages(id, {});
-      const messages = Array.isArray(messagesRes)
-        ? messagesRes
-        : (messagesRes as unknown as { data?: Array<Record<string, unknown>> }).data || [];
-
-      rawEvents = messages.map((msg: Record<string, unknown>) => ({
-        type: msg.role === "user" ? "user.message" : "agent.message",
-        timestamp: msg.created_at || msg.timestamp,
-        content: msg.content,
-        usage: msg.usage,
-      }));
+      // Leave rawEvents empty on failure
     }
 
     // Enrich events
@@ -84,7 +75,7 @@ export async function GET(
     let totalOutputTokens = 0;
 
     const traceEvents: TraceEvent[] = rawEvents.map((event) => {
-      const eventTime = event.timestamp || event.created_at;
+      const eventTime = event.processed_at || event.timestamp || event.created_at;
       let relativeSeconds = 0;
       if (eventTime) {
         relativeSeconds = (new Date(eventTime as string).getTime() - sessionCreated) / 1000;
@@ -98,9 +89,9 @@ export async function GET(
         relative_seconds: relativeSeconds,
       };
 
-      // Extract token usage from model_request_end or usage fields
-      if (event.type === "span.model_request_end" || event.usage) {
-        const usage = (event.usage || event) as Record<string, unknown>;
+      // Token usage lives on the span.model_request_end event's model_usage field
+      if (event.type === "span.model_request_end" || event.model_usage || event.usage) {
+        const usage = (event.model_usage || event.usage || event) as Record<string, unknown>;
         const inputTokens = (usage.input_tokens as number) || 0;
         const outputTokens = (usage.output_tokens as number) || 0;
         const cacheRead = (usage.cache_read_input_tokens as number) || (usage.cache_read_tokens as number) || 0;

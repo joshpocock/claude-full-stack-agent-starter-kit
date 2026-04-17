@@ -32,9 +32,9 @@ export async function POST(request: Request) {
     const body = await request.json();
     const { title, description, agent_id, environment_id } = body;
 
-    if (!title || !description) {
+    if (!title) {
       return NextResponse.json(
-        { error: "title and description are required" },
+        { error: "title is required" },
         { status: 400 }
       );
     }

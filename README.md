@@ -1,265 +1,200 @@
-# Anthropic Full Stack Starter Kit
+# Stride Agents
 
-Everything you need to build with Anthropic's cloud automation stack: Managed Agents and Routines. Real, runnable examples in TypeScript and Python.
+An open-source control plane for Claude Managed Agents, Routines, and the full Anthropic cloud automation stack. Built with Next.js 15, TypeScript, and the Anthropic SDK.
 
-Companion repo for the Stride AI Academy video: "Anthropic's Full Automation Stack: From Terminal to Cloud"
+## What is this?
 
-## What's Inside
+Stride Agents is a self-hosted dashboard that wraps Anthropic's Managed Agents API into a production-ready web app. Instead of managing agents, sessions, environments, vaults, and routines through raw API calls or the Anthropic Console, you get a polished UI with features beyond what the console offers.
 
-**Managed Agents (examples 01-05):** Build production AI agents that run on Anthropic's cloud. Create agents, configure environments, start sessions, stream events. These agents run 24/7, survive crashes, and handle long-running tasks autonomously.
+**Core features:**
 
-**Routines (examples 06-08):** Pre-configured automations triggered by schedules, API calls, or GitHub webhooks. Fire-and-forget tasks that run without your laptop open.
+- **Agents** - Create, edit (Form + YAML/JSON), version history, per-tool permission controls, clone/delete
+- **Sessions** - Transcript + Debug views, event timeline waterfall, live polling, send messages/interrupts/events, archive
+- **Environments** - Cloud sandbox config with networking (Limited/Unrestricted), package managers (apt/cargo/gem/go/npm/pip), metadata
+- **Chat** - Multi-turn conversations with agents, session resume, conversation history sidebar
+- **Task Board** - Queue work for agents, drag-and-drop kanban, markdown results, session links, "Continue in Chat"
+- **Skills** - Browse 34,000+ community skills from the Mastra registry, import from GitHub, attach to agents
+- **Vaults** - Credential management for agent runtime access
+- **Routines** - Fire Claude Code routines via API, run tracking with calendar view, daily usage counter
+- **Settings** - API key management (DB or .env), no restart needed
+- **Analytics** - Token usage, cost tracking, model breakdown
 
-**Templates:** Reusable YAML configs you can paste directly into the Anthropic console.
+## Quick Start
 
-## Prerequisites
+### Prerequisites
 
-Before running anything:
+- **Node.js 22+**
+- **pnpm** (recommended) or npm
+- **Anthropic API key** with Managed Agents access
 
-1. **Anthropic API key** with Managed Agents access (beta, enabled by default for all API accounts)
-2. **Node.js 18+** (for TypeScript examples) or **Python 3.10+** (for Python examples)
-3. **GitHub token** (only for example 03, the code reviewer)
-
-## Setup
-
-### Step 1: Install dependencies
-
-TypeScript:
-```bash
-npm install @anthropic-ai/sdk
-```
-
-Python:
-```bash
-pip install anthropic
-```
-
-### Step 2: Set your API key
+### Install and run
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Clone
+git clone https://github.com/joshpocock/anthropic-full-stack-starter-kit.git
+cd anthropic-full-stack-starter-kit
+
+# Install dependencies
+pnpm install
+
+# Configure
+cp .env.example .env
+# Edit .env and add your ANTHROPIC_API_KEY
+# Or skip this and set it in the Settings page after launch
+
+# Run
+pnpm dev
 ```
 
-Or copy `.env.example` to `.env` and fill in your key.
+Open [http://localhost:3002](http://localhost:3002).
 
-### Step 3: Verify access
+### Alternative: set API key via UI
 
-Quick check that your key works with Managed Agents:
+If you don't want to edit `.env`, just run `pnpm dev` and navigate to **Settings** in the sidebar. Paste your API key there - it's stored in the local SQLite database and takes priority over `.env`. No restart needed.
 
-```bash
-curl -s https://api.anthropic.com/v1/agents \
-  -H "x-api-key: $ANTHROPIC_API_KEY" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "anthropic-beta: managed-agents-2026-04-01" \
-  -H "content-type: application/json" \
-  -d '{"name":"test","model":"claude-sonnet-4-6","tools":[{"type":"agent_toolset_20260401"}]}' | head -c 200
+## Project Structure
+
+```
+app/                    # Next.js app router pages
+  agents/               # Agent list, detail (tabs: Agent/Sessions), create
+  board/                # Task board (kanban with drag-and-drop)
+  chat/                 # Multi-turn chat with session resume
+  environments/         # Environment list + create (networking, packages, metadata)
+  routines/             # Routine dashboard with calendar + run tracking
+  sessions/             # Session list (filters) + detail (Transcript/Debug)
+  settings/             # API key management
+  skills/               # Skills browser (Bundled/Anthropic/GitHub/Library tabs)
+  templates/            # Agent template gallery
+  vaults/               # Credential vault management
+  analytics/            # Usage analytics
+  quickstart/           # Guided setup wizard
+
+app/api/                # API routes (proxy to Anthropic SDK)
+  agents/               # CRUD + versions
+  board/                # Task CRUD + streaming
+  chat/                 # Session-backed chat + history
+  environments/         # CRUD
+  routines/             # CRUD + fire + run tracking
+  sessions/             # List, create, events, trace, replay, archive, interrupt
+  settings/             # App settings (API key)
+  skills/               # Bundled + Anthropic + GitHub import + Mastra library
+  vaults/               # CRUD + credentials
+
+components/             # Shared UI components
+  AgentEditor.tsx       # Bidirectional Form/YAML/JSON editor
+  Modal.tsx, Toast.tsx  # UI primitives
+  TaskCard.tsx          # Board task card with Run button + session links
+  Sidebar.tsx           # Navigation with theme-aware logo
+  TopBar.tsx            # Header with Book button + theme toggle
+
+lib/                    # Shared utilities
+  anthropic.ts          # SDK client (reads key from Settings DB > .env)
+  db.ts                 # SQLite (chat sessions, tasks, routines, runs, settings)
+  types.ts              # TypeScript types matching the Anthropic SDK
+
+reference-scripts/      # Standalone TypeScript/Python examples
+  01-basic-agent/       # Agent lifecycle: create, configure, run
+  02-deep-researcher/   # Web research with report output
+  03-code-reviewer/     # GitHub PR review
+  04-scheduled-agent/   # Cron-triggered sessions
+  05-multi-environment/ # Same agent, different sandboxes
+  06-scheduled-routine/ # Fire a routine on a schedule
+  07-api-triggered-routine/ # Webhook-to-routine bridge
+  09-chat-agent/        # Standalone chat app (Next.js + Python/Flask)
+
+templates/              # YAML agent configs for the Anthropic Console
+docs/claude/            # Local copy of Anthropic platform docs
+public/                 # Logos + favicon
 ```
 
-If you get back a JSON object with an `id` field, you're good.
+## How it works
 
-## Testing Guide: Run Every Example
+The app is a Next.js frontend that talks to API routes in `app/api/`. Those routes use the `@anthropic-ai/sdk` to call Anthropic's Managed Agents API. Local state (chat history, board tasks, routines, settings) lives in a SQLite database at `data/app.db`.
 
-Use this checklist to verify everything works before recording or presenting.
-
-### Managed Agents Examples
-
-**Example 01: Basic Agent (start here)**
-```bash
-# TypeScript
-npx tsx examples/01-basic-agent/create-agent.ts
-
-# Python
-python examples/01-basic-agent/create-agent.py
 ```
-What to expect: Creates an agent, environment, and session. Sends a message asking Claude to write a haiku to a file, then read it back. You should see streamed events including tool calls (file write, file read) and text output.
-
-Proves: Full agent lifecycle works (create agent, create environment, create session, stream response).
-
-**Example 02: Deep Researcher**
-```bash
-npx tsx examples/02-deep-researcher/researcher.ts
-# or
-python examples/02-deep-researcher/researcher.py
-```
-What to expect: Creates a research agent that searches the web and writes a report. Takes 1-3 minutes. You should see web search tool calls and a final report.
-
-Proves: Web search tool, file writing, longer multi-step sessions.
-
-**Example 03: Code Reviewer**
-```bash
-export GITHUB_TOKEN="ghp_..."
-npx tsx examples/03-code-reviewer/reviewer.ts
-# or
-python examples/03-code-reviewer/reviewer.py
-```
-What to expect: Creates an agent that reviews a GitHub PR. Requires a valid GITHUB_TOKEN. You should see git clone operations and review comments.
-
-Proves: Environment setup commands, GitHub integration, practical production use case.
-
-**Example 04: Scheduled Agent**
-```bash
-npx tsx examples/04-scheduled-agent/scheduled.ts
-# or
-python examples/04-scheduled-agent/scheduled.py
-```
-What to expect: Demonstrates the pattern for triggering agent sessions on a schedule. Shows how you would wire this into cron or trigger.dev.
-
-Proves: Programmatic session creation for recurring tasks.
-
-**Example 05: Multi-Environment**
-```bash
-npx tsx examples/05-multi-environment/environments.ts
-# or
-python examples/05-multi-environment/environments.py
-```
-What to expect: Creates one agent config but three different environments (Python data science, Node web dev, full-stack). Runs the same task in each to show how the environment changes the agent's capabilities.
-
-Proves: Environment reuse, agent config reuse, different container setups.
-
-**Example 09: Chat Agent (Next.js)**
-```bash
-cd examples/09-chat-agent
-npm install
-npm run dev
-# Open http://localhost:3000
-```
-What to expect: A full chat interface in your browser. Dark theme with gold accents. Type a message, Claude responds. Conversations persist across page refreshes using SQLite session mapping.
-
-First message takes 30-60 seconds (provisioning the container). Subsequent messages are faster.
-
-There's also a Python/Flask version:
-```bash
-cd examples/09-chat-agent
-pip install -r requirements.txt
-python server.py
-# Open http://localhost:3000
+Browser  -->  Next.js API routes  -->  Anthropic SDK  -->  api.anthropic.com
+                    |
+                SQLite (local state)
 ```
 
-Proves: Multi-turn conversations, session reuse, real product pattern (replaces n8n's 10-node workflow with one app).
+Key API mappings:
 
----
-
-### Routines Examples
-
-**Example 06: Scheduled Routine**
-```bash
-npx tsx examples/06-scheduled-routine/routine.ts
-# or
-python examples/06-scheduled-routine/routine.py
-```
-What to expect: Fires a routine via the `/fire` API endpoint. Returns a session URL where you can track progress.
-
-Before running: You need a routine configured at claude.ai/code/routines. Replace `TRIGGER_ID` in the code with your actual trigger ID.
-
-Proves: Routines API, fire-and-forget pattern, session URL tracking.
-
-**Example 07: API-Triggered Routine (Webhook Handler)**
-```bash
-# Start the server
-npx tsx examples/07-api-triggered-routine/webhook-handler.ts
-# or
-python examples/07-api-triggered-routine/webhook-handler.py
-
-# In another terminal, simulate an alert
-curl -X POST http://localhost:3000/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"alert":"High error rate in auth-service","severity":"critical"}'
-```
-What to expect: Starts a local Express/Flask server. When it receives a webhook, it forwards the payload to a routine's /fire endpoint. Returns the session URL.
-
-Before running: Replace `TRIGGER_ID` with your actual trigger ID.
-
-Proves: Webhook-to-routine pattern, how to wire Datadog/Sentry/PagerDuty into routines.
-
-**Example 08: GitHub Routine (Setup Guide)**
-
-This one is a markdown guide, not runnable code. Read it at:
-```
-examples/08-github-routine/setup-guide.md
-```
-Walk through it step by step in the claude.ai/code/routines web UI to set up a GitHub-triggered PR review routine.
-
-Proves: GitHub webhook configuration, PR filters, event types, branch safety.
-
-## Video Coverage Map
-
-If you run all examples, here's what you've covered from the video:
-
-| Video Section | Starter Kit Coverage |
+| Stride Agents | Anthropic API |
 |---|---|
-| Routines: API trigger | Example 06 (scheduled), Example 07 (webhook) |
-| Routines: GitHub trigger | Example 08 (setup guide) |
-| Managed Agents: Platform tour | Not in kit. Screen-record platform.claude.com |
-| Managed Agents: Architecture | Example 01 demonstrates brain/hands/session in action |
-| Managed Agents: Code walkthrough | Examples 01-05 cover every API pattern |
-| Managed Agents: Multi-environment | Example 05 |
-| Managed Agents: Chat product | Example 09 (Next.js chat agent with session persistence) |
-| When to use what | Example 04 comments explain routines vs crons vs trigger.dev |
+| Create agent | `client.beta.agents.create()` |
+| Start session | `client.beta.sessions.create({ agent, environment_id })` |
+| Send message | `client.beta.sessions.events.send()` |
+| Stream events | `client.beta.sessions.events.stream()` |
+| Fire routine | `POST /v1/claude_code/routines/{id}/fire` |
 
-The only thing NOT covered by the starter kit is the Console UI walkthrough (screen-record the wizard at platform.claude.com) and the Ultraplan demo (run `/ultraplan` in Claude Code CLI).
-
-## Templates
-
-Paste these YAML configs into the Anthropic Console to create agents and routines quickly.
-
-**Managed Agent templates:**
-
-| Template | Use Case |
-|---|---|
-| `templates/deep-researcher.yaml` | Web research and report writing |
-| `templates/code-reviewer.yaml` | GitHub PR review with structured checklist |
-| `templates/data-processor.yaml` | CSV/JSON data analysis and transformation |
-| `templates/content-writer.yaml` | Blog posts and documentation drafting |
-
-**Routine templates:**
-
-| Template | Use Case |
-|---|---|
-| `templates/nightly-triage.yaml` | Scheduled issue triage with Slack summary |
-| `templates/pr-reviewer.yaml` | GitHub-triggered code review with team checklist |
-
-## Two Different APIs
-
-This starter kit covers two separate Anthropic products:
+## Two Anthropic products, one dashboard
 
 | | Managed Agents | Routines |
 |---|---|---|
-| API base | `/v1/agents`, `/v1/sessions`, `/v1/environments` | `/v1/claude_code/routines/{id}/fire` |
+| API | `/v1/agents`, `/v1/sessions`, `/v1/environments` | `/v1/claude_code/routines/{id}/fire` |
+| Auth | `x-api-key` (Anthropic API key) | `Bearer` (per-routine token, `sk-ant-oat01-...`) |
 | Beta header | `managed-agents-2026-04-01` | `experimental-cc-routine-2026-04-01` |
 | Billing | $0.08/session-hour + tokens | Subscription (Pro/Max/Team/Enterprise) |
 | Use case | Production agent apps | Developer workflow automation |
-| Daily limits | Rate limited (60 creates/min) | 5-25 runs/day depending on plan |
 
-## Built-in Tools
+## Built-in agent tools
 
-Every Managed Agent session includes `agent_toolset_20260401`:
+Every agent session includes `agent_toolset_20260401`:
 
-- **Bash**: run shell commands in the container
-- **File operations**: read, write, edit, glob, grep
-- **Web search**: search the internet
-- **Web fetch**: retrieve content from URLs
-- **MCP servers**: connect to external tool providers
+| Tool | What it does |
+|---|---|
+| `bash` | Run shell commands in the sandbox |
+| `read` / `write` / `edit` | File operations |
+| `glob` / `grep` | File search |
+| `web_search` | Search the web |
+| `web_fetch` | Fetch URL content |
+
+You can disable individual tools or set permission policies (always allow / require confirmation) per tool in the agent editor.
+
+## Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | Yes* | Your Anthropic API key. *Or set via Settings page |
+| `ANTHROPIC_MODEL` | No | Override default model (default: `claude-sonnet-4-20250514`) |
+| `GITHUB_TOKEN` | No | For GitHub-based skill imports and code reviewer example |
 
 ## Troubleshooting
 
-**"unauthorized" error**: Check your ANTHROPIC_API_KEY is set and valid.
+**"unauthorized" error**: Check your API key in Settings or `.env`.
 
-**"beta header required" error**: Make sure you're using the SDK (it sets the header automatically). If using curl, add `-H "anthropic-beta: managed-agents-2026-04-01"`.
+**"environment_id: Field required"**: Sessions require an environment. Create one at `/environments/new`.
 
-**Routine returns 404**: Make sure you've created the routine at claude.ai/code/routines first. The trigger ID in the code must match your actual routine.
+**Agent model shows as `[object Object]`**: The API returns `model` as `{id, speed}`. This is handled automatically.
 
-**Session takes a long time to start**: First session after creating an environment can take 30-60 seconds while the container provisions. Subsequent sessions are faster.
+**Routine returns 404**: The routine ID must be prefixed `trig_`. Get it from claude.ai/code/routines.
 
-**Rate limit errors**: Managed Agents allow 60 creates per minute and 600 reads per minute per organization. Space out your requests if running multiple examples.
+**Routine returns 401**: The bearer token is per-routine (`sk-ant-oat01-...`), not your API key.
+
+**Session takes a long time**: First session after creating an environment provisions the container (30-60s). Subsequent sessions are faster.
+
+## Reference scripts
+
+The `reference-scripts/` folder contains standalone examples you can run directly:
+
+```bash
+# TypeScript
+pnpm tsx reference-scripts/01-basic-agent/create-agent.ts
+
+# Python
+pip install anthropic
+python reference-scripts/01-basic-agent/create-agent.py
+```
 
 ## Links
 
-- Managed Agents docs: https://platform.claude.com/docs/en/managed-agents/overview
-- Routines docs: https://code.claude.com/docs/en/routines
-- Anthropic Console: https://platform.claude.com
-- Routines UI: https://claude.ai/code/routines
-- Free Stride community: https://www.skool.com/stride-ai-academy-7057
+- [Managed Agents docs](https://platform.claude.com/docs/en/managed-agents/overview)
+- [Routines docs](https://code.claude.com/docs/en/routines)
+- [Anthropic Console](https://platform.claude.com)
+- [Routines UI](https://claude.ai/code/routines)
+- [Stride AI Academy](https://www.skool.com/stride-ai-academy-7057)
+- [Executive Stride](https://www.executivestride.com)
 
 ## License
 
-MIT. Use these examples however you want.
+MIT

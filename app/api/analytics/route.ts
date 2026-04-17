@@ -55,29 +55,40 @@ export async function GET() {
         const model = session.model || "claude-sonnet-4-6";
 
         try {
-          // @ts-expect-error - list_messages may not be in current SDK type defs
-          const messagesRes = await client.beta.sessions.list_messages(session.id, {});
-          const messages = Array.isArray(messagesRes)
-            ? messagesRes
-            : (messagesRes as unknown as { data?: Array<Record<string, unknown>> }).data || [];
+          const events: Array<Record<string, unknown>> = [];
+          const page = (await (client.beta as any).sessions.events.list(
+            session.id,
+            {}
+          )) as any;
+          if (Array.isArray(page?.data)) {
+            events.push(...page.data);
+          } else if (page && typeof page[Symbol.asyncIterator] === "function") {
+            for await (const ev of page as AsyncIterable<Record<string, unknown>>) {
+              events.push(ev);
+            }
+          }
 
-          for (const msg of messages as Array<Record<string, unknown>>) {
-            const usage = msg.usage as Record<string, number> | undefined;
-            if (usage) {
-              inputTokens += usage.input_tokens || 0;
-              outputTokens += usage.output_tokens || 0;
-            } else if (msg.content) {
-              const content = msg.content as Array<{ type?: string; text?: string }>;
-              const textLength = content
-                .filter((c) => c.type === "text" && c.text)
-                .reduce((sum, c) => sum + (c.text?.length || 0), 0);
-              const estimated = Math.ceil(textLength / 4);
-              if (msg.role === "user") inputTokens += estimated;
-              else outputTokens += estimated;
+          for (const ev of events) {
+            if (ev.type === "span.model_request_end") {
+              const usage = ev.model_usage as Record<string, number> | undefined;
+              if (usage) {
+                inputTokens += usage.input_tokens || 0;
+                outputTokens += usage.output_tokens || 0;
+              }
+            } else if (ev.type === "user.message" || ev.type === "agent.message") {
+              const content = ev.content as Array<{ type?: string; text?: string }> | undefined;
+              if (Array.isArray(content)) {
+                const textLength = content
+                  .filter((c) => c.type === "text" && c.text)
+                  .reduce((sum, c) => sum + (c.text?.length || 0), 0);
+                const estimated = Math.ceil(textLength / 4);
+                if (ev.type === "user.message") inputTokens += estimated;
+                else outputTokens += estimated;
+              }
             }
           }
         } catch {
-          // Skip if messages can't be fetched
+          // Skip if events can't be fetched
         }
 
         const pricing = MODEL_PRICING[model] || MODEL_PRICING["claude-sonnet-4-6"];

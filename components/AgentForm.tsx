@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { Plus, Trash2, Sparkles } from "lucide-react";
 import type { Agent, McpServer } from "@/lib/types";
+import { getModelId } from "@/lib/types";
 
 interface SkillOption {
   id: string;
@@ -54,7 +55,9 @@ export default function AgentForm({
   const [description, setDescription] = useState(
     initialData?.description || ""
   );
-  const [model, setModel] = useState(initialData?.model || "claude-sonnet-4-6");
+  const [model, setModel] = useState(
+    getModelId(initialData?.model) || "claude-sonnet-4-6"
+  );
   const [system, setSystem] = useState(initialData?.system || "");
   const [selectedTools, setSelectedTools] = useState<string[]>(
     initialData?.tools?.map((t) => t.type) || ["agent_toolset_20260401"]

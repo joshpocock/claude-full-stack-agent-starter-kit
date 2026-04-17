@@ -12,13 +12,11 @@ export async function GET() {
     const vaults: any[] = [];
     try {
       const response = await (client.beta as any).vaults.list();
-      // Handle paginated or direct array response
       if (Array.isArray(response)) {
         vaults.push(...response);
       } else if (response?.data) {
         vaults.push(...response.data);
       } else {
-        // Try async iteration
         for await (const vault of (client.beta as any).vaults.list()) {
           vaults.push(vault);
         }
@@ -26,7 +24,12 @@ export async function GET() {
     } catch {
       // If the list method doesn't exist yet in the SDK, return empty
     }
-    return NextResponse.json(vaults);
+    // The SDK exposes the human-readable name as `display_name`; our UI reads `name`.
+    const normalized = vaults.map((v) => ({
+      ...v,
+      name: v?.name ?? v?.display_name ?? "",
+    }));
+    return NextResponse.json(normalized);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to list vaults";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -53,12 +56,15 @@ export async function POST(request: Request) {
 
     const client = getClient();
     // Anthropic API uses display_name for vaults, not name
-    const vault = await (client.beta as any).vaults.create({
+    const vault: any = await (client.beta as any).vaults.create({
       display_name: name,
       ...(metadata && { metadata }),
     });
 
-    return NextResponse.json(vault, { status: 201 });
+    return NextResponse.json(
+      { ...vault, name: vault?.name ?? vault?.display_name ?? name },
+      { status: 201 }
+    );
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to create vault";
     return NextResponse.json({ error: message }, { status: 500 });

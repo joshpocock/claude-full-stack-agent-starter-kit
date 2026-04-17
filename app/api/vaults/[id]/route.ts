@@ -19,7 +19,11 @@ export async function GET(
       client.beta.vaults.credentials.list(id),
     ]);
 
-    return NextResponse.json({ ...vault, credentials });
+    return NextResponse.json({
+      ...vault,
+      name: (vault as any)?.name ?? (vault as any)?.display_name ?? "",
+      credentials,
+    });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to retrieve vault";
     return NextResponse.json({ error: message }, { status: 500 });

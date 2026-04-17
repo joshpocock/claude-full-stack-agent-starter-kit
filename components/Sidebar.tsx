@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useState, useEffect, useCallback } from "react";
 import {
@@ -19,8 +20,10 @@ import {
   Search,
   Zap,
   BarChart3,
+  Settings,
 } from "lucide-react";
 import { useCommandPalette } from "./CommandPalette";
+import { useTheme } from "./ThemeProvider";
 
 const navItems = [
   { icon: Rocket, label: "Quickstart", href: "/quickstart" },
@@ -35,13 +38,18 @@ const navItems = [
   { icon: Package, label: "Templates", href: "/templates" },
   { icon: Zap, label: "Routines", href: "/routines" },
   { icon: BarChart3, label: "Analytics", href: "/analytics" },
+  { icon: Settings, label: "Settings", href: "/settings" },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { theme } = useTheme();
   const { setOpen: setCommandPaletteOpen } = useCommandPalette();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+
+  const logoSrc =
+    theme === "light" ? "/stride-agents-black.svg" : "/stride-agents-white.svg";
 
   const checkMobile = useCallback(() => {
     setIsMobile(window.innerWidth < 768);
@@ -138,32 +146,39 @@ export default function Sidebar() {
             borderBottom: "1px solid var(--border-color)",
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
+            justifyContent: "center",
+            position: "relative",
           }}
         >
           <Link
             href="/"
             onClick={handleNavClick}
+            aria-label="Stride Agents"
             style={{
-              display: "flex",
+              display: "inline-flex",
               alignItems: "center",
-              gap: 10,
-              fontFamily: "'Poppins', sans-serif",
-              fontWeight: 700,
-              fontSize: 15,
-              color: "var(--accent)",
+              justifyContent: "center",
               textDecoration: "none",
-              letterSpacing: "-0.3px",
             }}
           >
-            <Bot size={22} />
-            <span>Agent Dashboard</span>
+            <Image
+              src={logoSrc}
+              alt="Stride Agents"
+              width={180}
+              height={42}
+              priority
+              style={{ height: 32, width: "auto", display: "block" }}
+            />
           </Link>
           {isMobile && (
             <button
               onClick={() => setMobileOpen(false)}
               aria-label="Close menu"
               style={{
+                position: "absolute",
+                right: 12,
+                top: "50%",
+                transform: "translateY(-50%)",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",

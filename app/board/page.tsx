@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useSearchParams } from "next/navigation";
-import type { BoardTask, Agent } from "@/lib/types";
+import type { BoardTask, Agent, Environment } from "@/lib/types";
 import TaskCard from "@/components/TaskCard";
 import Modal from "@/components/Modal";
 import SearchBar from "@/components/SearchBar";
 import ShortcutHint from "@/components/ShortcutHint";
+import { useToast } from "@/components/Toast";
 
 type Column = "todo" | "in_progress" | "done";
 
@@ -23,12 +24,17 @@ const columnHeaderColors: Record<Column, string> = {
 };
 
 export default function BoardPage() {
+  const { showToast } = useToast();
   const [tasks, setTasks] = useState<BoardTask[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [environments, setEnvironments] = useState<Environment[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
+  // Pause polling while a task is transitioning to prevent reverting optimistic updates
+  const pausePollingRef = useRef(false);
   const [newDesc, setNewDesc] = useState("");
   const [newAgentId, setNewAgentId] = useState("");
+  const [newEnvId, setNewEnvId] = useState("");
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
   const searchParams = useSearchParams();
@@ -43,6 +49,7 @@ export default function BoardPage() {
   }, [searchParams]);
 
   const fetchTasks = useCallback(async () => {
+    if (pausePollingRef.current) return;
     try {
       const res = await fetch("/api/board");
       if (res.ok) setTasks(await res.json());
@@ -51,11 +58,28 @@ export default function BoardPage() {
 
   useEffect(() => {
     fetchTasks();
+    const preselectedAgent = searchParams.get("agent");
     fetch("/api/agents")
       .then((r) => (r.ok ? r.json() : []))
       .then((data: Agent[]) => {
-        setAgents(data);
-        if (data.length > 0) setNewAgentId(data[0].id);
+        const list = Array.isArray(data) ? data : [];
+        setAgents(list);
+        if (preselectedAgent && list.some((a) => a.id === preselectedAgent)) {
+          setNewAgentId(preselectedAgent);
+        } else if (list.length > 0) {
+          setNewAgentId(list[0].id);
+        }
+      })
+      .catch(() => {});
+    fetch("/api/environments")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => {
+        const list: Environment[] = Array.isArray(data)
+          ? data
+          : (data?.data ?? []);
+        setEnvironments(list);
+        const first = list.find((e) => !e.archived_at) ?? list[0];
+        if (first?.id) setNewEnvId(first.id);
       })
       .catch(() => {});
   }, [fetchTasks]);
@@ -99,6 +123,49 @@ export default function BoardPage() {
     e.dataTransfer.dropEffect = "move";
   };
 
+  const handleStart = async (taskId: number) => {
+    // Pause polling so it doesn't revert optimistic update
+    pausePollingRef.current = true;
+
+    // Optimistic update - move to in_progress immediately
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId ? { ...t, status: "in_progress" } : t
+      )
+    );
+
+    try {
+      const res = await fetch(`/api/board/${taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "in_progress" }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "Failed to start task");
+        const parsed = parseApiError(errText);
+        showToast(parsed.message, "error", parsed.action);
+        setTasks((prev) =>
+          prev.map((t) =>
+            t.id === taskId ? { ...t, status: "todo" } : t
+          )
+        );
+      }
+    } catch {
+      showToast("Failed to start task", "error");
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId ? { ...t, status: "todo" } : t
+        )
+      );
+    }
+
+    // Resume polling after a delay
+    setTimeout(() => {
+      pausePollingRef.current = false;
+    }, 10000);
+  };
+
   const createTask = async () => {
     if (!newTitle.trim()) return;
     setCreating(true);
@@ -110,6 +177,7 @@ export default function BoardPage() {
           title: newTitle.trim(),
           description: newDesc.trim(),
           agent_id: newAgentId || undefined,
+          environment_id: newEnvId || undefined,
         }),
       });
       setNewTitle("");
@@ -171,7 +239,8 @@ export default function BoardPage() {
           display: "grid",
           gridTemplateColumns: "repeat(3, 1fr)",
           gap: 16,
-          minHeight: "calc(100vh - 220px)",
+          height: "calc(100vh - 220px)",
+          overflow: "hidden",
         }}
       >
         {columns.map((col) => (
@@ -187,6 +256,7 @@ export default function BoardPage() {
               display: "flex",
               flexDirection: "column",
               gap: 12,
+              overflowY: "auto",
             }}
           >
             <div
@@ -223,6 +293,7 @@ export default function BoardPage() {
                 key={task.id}
                 task={task}
                 onDragStart={handleDragStart}
+                onStart={handleStart}
               />
             ))}
             {tasksByColumn(col.key).length === 0 && (
@@ -309,6 +380,32 @@ export default function BoardPage() {
               ))}
             </select>
           </div>
+          <div>
+            <label
+              style={{
+                display: "block",
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                marginBottom: 6,
+              }}
+            >
+              Environment
+            </label>
+            <select
+              value={newEnvId}
+              onChange={(e) => setNewEnvId(e.target.value)}
+              style={{ width: "100%" }}
+            >
+              {environments.length === 0 && (
+                <option value="">No environments available</option>
+              )}
+              {environments.map((env) => (
+                <option key={env.id} value={env.id}>
+                  {env.name}
+                </option>
+              ))}
+            </select>
+          </div>
           <button
             onClick={createTask}
             disabled={!newTitle.trim() || creating}
@@ -324,4 +421,44 @@ export default function BoardPage() {
       </Modal>
     </div>
   );
+}
+
+/**
+ * Parse raw API error text into a clean user-facing message + optional action.
+ */
+function parseApiError(raw: string): {
+  message: string;
+  action?: { label: string; href: string };
+} {
+  try {
+    const parsed = JSON.parse(raw);
+    const msg = parsed?.error?.message || parsed?.error || raw;
+
+    // MCP server blocked by environment
+    if (typeof msg === "string" && msg.includes("blocked by environment network policy")) {
+      return {
+        message: "MCP servers blocked by environment network policy",
+        action: { label: "Fix Environment", href: "/environments/new" },
+      };
+    }
+
+    // agent_id required
+    if (typeof msg === "string" && msg.includes("agent_id is required")) {
+      return {
+        message: "Select an agent for this task first",
+      };
+    }
+
+    // environment_id required
+    if (typeof msg === "string" && msg.includes("environment_id")) {
+      return {
+        message: "No environment configured",
+        action: { label: "Create Environment", href: "/environments/new" },
+      };
+    }
+
+    return { message: typeof msg === "string" ? msg.slice(0, 120) : "Task failed" };
+  } catch {
+    return { message: raw.slice(0, 120) || "Task failed" };
+  }
 }

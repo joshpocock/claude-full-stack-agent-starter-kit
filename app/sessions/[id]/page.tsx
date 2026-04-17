@@ -25,7 +25,13 @@ import {
   Plug,
   Cpu,
   Coins,
+  Archive,
+  OctagonMinus,
+  Send,
+  MoreHorizontal,
 } from "lucide-react";
+import { useToast } from "@/components/Toast";
+import Modal from "@/components/Modal";
 
 interface ReplayEvent {
   id: string;
@@ -40,9 +46,12 @@ interface ReplayEvent {
 
 interface SessionInfo {
   id: string;
-  agent_id: string;
+  agent_id: string | null;
+  environment_id?: string | null;
   status: string;
   created_at: string;
+  updated_at?: string;
+  archived_at?: string | null;
   durationMs: number;
   tokenEstimate: number;
 }
@@ -439,7 +448,10 @@ export default function SessionReplayPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [activeTab, setActiveTab] = useState<"replay" | "trace">("replay");
+  const [activeTab, setActiveTab] = useState<"transcript" | "debug">(
+    "transcript"
+  );
+  const [messageInputOpen, setMessageInputOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -448,50 +460,188 @@ export default function SessionReplayPage() {
   const playIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    async function load() {
+  // Actions menu + message input + modals
+  const { showToast } = useToast();
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [sendEventOpen, setSendEventOpen] = useState(false);
+  const [sendEventDraft, setSendEventDraft] = useState(
+    '{\n  "type": "user.message",\n  "content": [{ "type": "text", "text": "..." }]\n}'
+  );
+  const [sendEventBusy, setSendEventBusy] = useState(false);
+  const [sendEventError, setSendEventError] = useState<string | null>(null);
+
+  const [messageInput, setMessageInput] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+
+  const handleSendMessage = async () => {
+    const text = messageInput.trim();
+    if (!text || sendingMessage) return;
+    setSendingMessage(true);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/send-event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || "Failed to send message", "error");
+        return;
+      }
+      showToast("Message sent", "success");
+      setMessageInput("");
+      // Give the API a beat to process, then refetch
+      setTimeout(() => {
+        refresh();
+      }, 500);
+    } finally {
+      setSendingMessage(false);
+    }
+  };
+
+  const handleInterrupt = async () => {
+    setActionsOpen(false);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/interrupt`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || "Failed to interrupt", "error");
+        return;
+      }
+      showToast("Interrupt sent", "success");
+      setTimeout(() => refresh(), 500);
+    } catch {
+      showToast("Network error", "error");
+    }
+  };
+
+  const handleArchive = async () => {
+    setActionsOpen(false);
+    if (
+      !window.confirm(
+        "Archive this session? It will no longer accept new events."
+      )
+    ) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/archive`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || "Failed to archive", "error");
+        return;
+      }
+      showToast("Session archived", "success");
+    } catch {
+      showToast("Network error", "error");
+    }
+  };
+
+  const handleSendEvent = async () => {
+    setSendEventError(null);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(sendEventDraft);
+    } catch (err) {
+      setSendEventError(
+        err instanceof Error ? err.message : "Invalid JSON"
+      );
+      return;
+    }
+    const body: Record<string, unknown> = Array.isArray(parsed)
+      ? { events: parsed }
+      : (parsed as Record<string, unknown>);
+    setSendEventBusy(true);
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/send-event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setSendEventError(err.error || "Failed to send event");
+        return;
+      }
+      showToast("Event sent", "success");
+      setSendEventOpen(false);
+      setTimeout(() => refresh(), 500);
+    } finally {
+      setSendEventBusy(false);
+    }
+  };
+
+  // Single replay refresh. Safe to call repeatedly for polling.
+  const refresh = useCallback(
+    async (opts?: { initial?: boolean }) => {
       try {
         const res = await fetch(`/api/sessions/${sessionId}/replay`);
         if (!res.ok) {
-          const data = await res.json();
-          setError(data.error || "Failed to load replay data");
-          setLoading(false);
+          if (opts?.initial) {
+            const data = await res.json().catch(() => ({}));
+            setError(data.error || "Failed to load session");
+          }
           return;
         }
-
         const data = await res.json();
         setSession(data.session);
-        setEvents(data.events || []);
+        const nextEvents: ReplayEvent[] = data.events || [];
+        setEvents((prev) => {
+          // Only auto-advance visibleUpTo when new events arrived
+          if (nextEvents.length > prev.length) {
+            setVisibleUpTo(nextEvents.length - 1);
+          }
+          return nextEvents;
+        });
 
-        if (data.events?.length > 0) {
-          setSelectedIndex(0);
-          setVisibleUpTo(data.events.length - 1);
-        }
-
-        // Fetch agent name
-        if (data.session?.agent_id) {
-          try {
-            const agentRes = await fetch(
-              `/api/agents/${data.session.agent_id}`
-            );
-            if (agentRes.ok) {
-              const agent = await agentRes.json();
-              setAgentName(agent.name || "Unknown Agent");
-            } else {
+        if (opts?.initial) {
+          if (nextEvents.length > 0) setSelectedIndex(0);
+          if (data.session?.agent_id) {
+            try {
+              const agentRes = await fetch(
+                `/api/agents/${data.session.agent_id}`
+              );
+              if (agentRes.ok) {
+                const agent = await agentRes.json();
+                setAgentName(agent.name || "Unknown Agent");
+              } else {
+                setAgentName("Unknown Agent");
+              }
+            } catch {
               setAgentName("Unknown Agent");
             }
-          } catch {
+          } else {
             setAgentName("Unknown Agent");
           }
         }
       } catch {
-        setError("Failed to connect to server");
+        if (opts?.initial) setError("Failed to connect to server");
       } finally {
-        setLoading(false);
+        if (opts?.initial) setLoading(false);
       }
+    },
+    [sessionId]
+  );
+
+  // Initial load + polling while the session is live
+  useEffect(() => {
+    refresh({ initial: true });
+  }, [refresh]);
+
+  useEffect(() => {
+    // Stop polling if archived or we've hit an error
+    if (error || session?.status === "terminated" || session?.archived_at) {
+      return;
     }
-    load();
-  }, [sessionId]);
+    const interval = setInterval(() => {
+      refresh();
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [refresh, error, session?.status, session?.archived_at]);
 
   // Playback logic
   const stopPlayback = useCallback(() => {
@@ -646,6 +796,54 @@ export default function SessionReplayPage() {
 
   const selectedEvent = events[selectedIndex] || null;
 
+  // The Transcript tab hides internal plumbing (model requests, status pings,
+  // thinking, tool wiring) and shows only the human-visible conversation.
+  const TRANSCRIPT_TYPES = new Set([
+    "user.message",
+    "agent.message",
+    "user.interrupt",
+  ]);
+  const visibleEvents =
+    activeTab === "transcript"
+      ? events.filter((e) => TRANSCRIPT_TYPES.has(e.rawType))
+      : events;
+
+  // For each agent.message in transcript mode, find the most recent
+  // span.model_request_end that preceded it so we can show token counts.
+  const tokenLookup = new Map<string, { input: number; output: number }>();
+  const tokenSummary = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  };
+  {
+    let pending: { input: number; output: number } | null = null;
+    for (const ev of events) {
+      if (ev.rawType === "span.model_request_end") {
+        const usage = (ev.detail as Record<string, unknown>)?.model_usage as
+          | Record<string, number>
+          | undefined;
+        const input = usage?.input_tokens ?? 0;
+        const output = usage?.output_tokens ?? 0;
+        const cacheRead = usage?.cache_read_input_tokens ?? 0;
+        const cacheWrite = usage?.cache_creation_input_tokens ?? 0;
+        tokenSummary.input += input;
+        tokenSummary.output += output;
+        tokenSummary.cacheRead += cacheRead;
+        tokenSummary.cacheWrite += cacheWrite;
+        pending = { input, output };
+      } else if (ev.rawType === "agent.message" && pending) {
+        tokenLookup.set(ev.id, pending);
+        pending = null;
+      }
+    }
+  }
+  const uncachedInput = Math.max(
+    0,
+    tokenSummary.input - tokenSummary.cacheRead
+  );
+
   return (
     <div>
       {/* Back link */}
@@ -732,19 +930,98 @@ export default function SessionReplayPage() {
             gap: 6,
             fontSize: 13,
             color: "var(--text-secondary)",
+            position: "relative",
+            cursor: "help",
           }}
+          title={`Tokens in / out\nCache read: ${tokenSummary.cacheRead.toLocaleString()}\nCache write: ${tokenSummary.cacheWrite.toLocaleString()}\nUncached in: ${uncachedInput.toLocaleString()}`}
         >
           <Hash size={14} />
-          ~{session?.tokenEstimate || 0} tokens
+          {tokenSummary.input + tokenSummary.output > 0
+            ? `${((tokenSummary.input + tokenSummary.output) / 1000).toFixed(1)}k / ${tokenSummary.output}`
+            : `~${session?.tokenEstimate || 0} tokens`}
         </div>
         <div
           style={{
             marginLeft: "auto",
-            fontSize: 12,
-            color: "var(--text-muted)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
           }}
         >
-          <code>{sessionId.substring(0, 24)}...</code>
+          <code
+            style={{
+              fontSize: 12,
+              color: "var(--text-muted)",
+            }}
+          >
+            {sessionId.substring(0, 24)}...
+          </code>
+
+          {/* Actions dropdown */}
+          <div style={{ position: "relative" }}>
+            <button
+              type="button"
+              onClick={() => setActionsOpen((v) => !v)}
+              onBlur={() =>
+                setTimeout(() => setActionsOpen(false), 120)
+              }
+              className="btn-secondary"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "7px 12px",
+                fontSize: 13,
+              }}
+            >
+              Actions
+              <ChevronDown size={14} />
+            </button>
+            {actionsOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 6px)",
+                  right: 0,
+                  minWidth: 200,
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: 8,
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                  padding: 4,
+                  zIndex: 40,
+                }}
+              >
+                <ActionsMenuItem
+                  icon={<OctagonMinus size={14} />}
+                  label="Send interrupt"
+                  onClick={handleInterrupt}
+                />
+                <ActionsMenuItem
+                  icon={<Send size={14} />}
+                  label="Send message"
+                  onClick={() => {
+                    setActionsOpen(false);
+                    setMessageInputOpen(true);
+                  }}
+                />
+                <ActionsMenuItem
+                  icon={<MoreHorizontal size={14} />}
+                  label="Send raw event..."
+                  onClick={() => {
+                    setActionsOpen(false);
+                    setSendEventOpen(true);
+                  }}
+                />
+                <ActionsMenuItem
+                  icon={<Archive size={14} />}
+                  label="Archive session"
+                  onClick={handleArchive}
+                  danger
+                />
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -759,8 +1036,8 @@ export default function SessionReplayPage() {
         }}
       >
         {([
-          { key: "replay" as const, label: "Replay", icon: Play },
-          { key: "trace" as const, label: "Trace", icon: Activity },
+          { key: "transcript" as const, label: "Transcript", icon: MessageSquare },
+          { key: "debug" as const, label: "Debug", icon: Activity },
         ]).map((tab) => {
           const TabIcon = tab.icon;
           const isActive = activeTab === tab.key;
@@ -791,11 +1068,19 @@ export default function SessionReplayPage() {
         })}
       </div>
 
-      {/* Trace Tab */}
-      {activeTab === "trace" && <TraceTab sessionId={sessionId} />}
+      {/* Event Timeline — waterfall of all events as colored markers */}
+      <EventTimeline
+        events={events}
+        selectedIndex={selectedIndex}
+        onSelect={(i) => {
+          setSelectedIndex(i);
+          setVisibleUpTo(Math.max(visibleUpTo, i));
+        }}
+        totalDurationMs={session?.durationMs ?? 0}
+      />
 
-      {/* Main replay area */}
-      {activeTab === "replay" && (
+      {/* Transcript / Debug area — shared two-pane view */}
+      {(
       <div
         style={{
           display: "flex",
@@ -833,14 +1118,16 @@ export default function SessionReplayPage() {
             }}
           >
             <span>
-              Timeline ({events.length} event{events.length !== 1 ? "s" : ""})
+              {activeTab === "transcript" ? "Transcript" : "Debug"} (
+              {visibleEvents.length} event
+              {visibleEvents.length !== 1 ? "s" : ""})
             </span>
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              {visibleUpTo + 1} {"/"} {events.length}
+              {events.length} total
             </span>
           </div>
           <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
-            {events.length === 0 ? (
+            {visibleEvents.length === 0 ? (
               <div
                 style={{
                   padding: 24,
@@ -849,29 +1136,30 @@ export default function SessionReplayPage() {
                   fontSize: 13,
                 }}
               >
-                No events recorded
+                {activeTab === "transcript"
+                  ? "No messages yet"
+                  : "No events recorded"}
               </div>
             ) : (
-              events.map((event, idx) => {
-                const config = typeConfig[event.type] || typeConfig.status;
-                const Icon = config.icon;
+              visibleEvents.map((event) => {
+                const idx = events.indexOf(event);
                 const isSelected = idx === selectedIndex;
-                const isVisible = idx <= visibleUpTo;
+                const role = transcriptRoleFor(event.rawType);
+                const tokens = tokenLookup.get(event.id);
 
                 return (
                   <button
                     key={event.id}
-                    id={`timeline-event-${idx}`}
                     onClick={() => {
                       setSelectedIndex(idx);
                       if (idx > visibleUpTo) setVisibleUpTo(idx);
                     }}
                     style={{
-                      display: "flex",
-                      alignItems: "flex-start",
+                      display: "grid",
+                      gridTemplateColumns: "64px 1fr auto",
                       gap: 10,
                       width: "100%",
-                      padding: "10px 16px",
+                      padding: "8px 14px",
                       textAlign: "left",
                       background: isSelected
                         ? "var(--accent-subtle)"
@@ -881,9 +1169,7 @@ export default function SessionReplayPage() {
                         ? "3px solid var(--accent)"
                         : "3px solid transparent",
                       cursor: "pointer",
-                      opacity: isVisible ? 1 : 0.3,
-                      transition:
-                        "background 0.15s ease, opacity 0.3s ease",
+                      alignItems: "center",
                     }}
                     onMouseEnter={(e) => {
                       if (!isSelected) {
@@ -897,63 +1183,51 @@ export default function SessionReplayPage() {
                       }
                     }}
                   >
-                    {/* Timeline dot */}
+                    <RoleBadge role={role} />
                     <div
                       style={{
-                        width: 28,
-                        height: 28,
-                        borderRadius: 8,
-                        background: config.bg,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        flexShrink: 0,
-                        marginTop: 1,
+                        fontSize: 13,
+                        color: "var(--text-primary)",
+                        lineHeight: 1.4,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
                       }}
                     >
-                      <Icon size={14} color={config.color} />
+                      {activeTab === "transcript" && role === "interrupt"
+                        ? "Interrupted"
+                        : event.description || event.rawType}
                     </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          marginBottom: 2,
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 500,
-                            color: config.color,
-                            textTransform: "uppercase",
-                            letterSpacing: "0.5px",
-                          }}
-                        >
-                          {config.label}
-                        </span>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {tokens && (
                         <span
                           style={{
                             fontSize: 11,
                             color: "var(--text-muted)",
+                            fontFamily: "monospace",
                           }}
+                          title={`Input: ${tokens.input.toLocaleString()} · Output: ${tokens.output.toLocaleString()}`}
                         >
-                          {formatMs(event.offsetMs)}
+                          {(tokens.input / 1000).toFixed(1)}k /{" "}
+                          {tokens.output}
                         </span>
-                      </div>
-                      <div
+                      )}
+                      <span
                         style={{
-                          fontSize: 12,
-                          color: "var(--text-secondary)",
-                          lineHeight: 1.4,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          fontFamily: "monospace",
                         }}
                       >
-                        {event.description || event.rawType}
-                      </div>
+                        {formatOffsetClock(event.offsetMs)}
+                      </span>
                     </div>
                   </button>
                 );
@@ -1104,7 +1378,214 @@ export default function SessionReplayPage() {
         </div>
       </div>
       )}
+
+      {/* Message input — shown only when user opens it via Actions */}
+      {messageInputOpen && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            marginTop: 16,
+            padding: "10px 12px",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-color)",
+            borderRadius: 10,
+            position: "sticky",
+            bottom: 16,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.25)",
+          }}
+        >
+          <input
+            autoFocus
+            value={messageInput}
+            onChange={(e) => setMessageInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage();
+              } else if (e.key === "Escape") {
+                setMessageInputOpen(false);
+              }
+            }}
+            placeholder="Send a message to the agent"
+            style={{
+              flex: 1,
+              padding: "8px 10px",
+              background: "transparent",
+              border: "none",
+              color: "var(--text-primary)",
+              fontSize: 14,
+              outline: "none",
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => setMessageInputOpen(false)}
+            className="btn-secondary"
+            style={{ padding: "7px 10px", fontSize: 13 }}
+            aria-label="Close"
+          >
+            Close
+          </button>
+          <button
+            type="button"
+            onClick={handleSendMessage}
+            disabled={!messageInput.trim() || sendingMessage}
+            className="btn-primary"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "7px 14px",
+              fontSize: 13,
+              opacity: !messageInput.trim() || sendingMessage ? 0.5 : 1,
+            }}
+          >
+            <Send size={14} />
+            {sendingMessage ? "Sending..." : "Send"}
+          </button>
+        </div>
+      )}
+
+      {/* Send event modal */}
+      <Modal
+        open={sendEventOpen}
+        onClose={() => {
+          setSendEventOpen(false);
+          setSendEventError(null);
+        }}
+        title="Send event"
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <p
+            style={{
+              fontSize: 13,
+              color: "var(--text-secondary)",
+              margin: 0,
+              lineHeight: 1.5,
+            }}
+          >
+            Send a raw event to the session. Provide a single event object or an
+            array, or use the{" "}
+            <code style={{ fontFamily: "monospace" }}>events</code> wrapper.
+          </p>
+          <textarea
+            value={sendEventDraft}
+            onChange={(e) => {
+              setSendEventDraft(e.target.value);
+              setSendEventError(null);
+            }}
+            spellCheck={false}
+            style={{
+              width: "100%",
+              minHeight: 220,
+              padding: 12,
+              fontFamily:
+                "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+              fontSize: 13,
+              lineHeight: 1.55,
+              background: "var(--bg-input)",
+              border: `1px solid ${
+                sendEventError ? "var(--error)" : "var(--border-color)"
+              }`,
+              borderRadius: 8,
+              color: "var(--text-primary)",
+              outline: "none",
+              resize: "vertical",
+            }}
+          />
+          {sendEventError && (
+            <p
+              style={{
+                fontSize: 12,
+                color: "var(--error)",
+                margin: 0,
+                fontFamily: "monospace",
+              }}
+            >
+              {sendEventError}
+            </p>
+          )}
+          <div
+            style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}
+          >
+            <button
+              className="btn-secondary"
+              onClick={() => setSendEventOpen(false)}
+              style={{ padding: "7px 14px", fontSize: 13 }}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn-primary"
+              onClick={handleSendEvent}
+              disabled={sendEventBusy}
+              style={{
+                padding: "7px 14px",
+                fontSize: 13,
+                opacity: sendEventBusy ? 0.6 : 1,
+              }}
+            >
+              {sendEventBusy ? "Sending..." : "Send"}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
+  );
+}
+
+function ActionsMenuItem({
+  icon,
+  label,
+  onClick,
+  danger,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        width: "100%",
+        padding: "9px 12px",
+        fontSize: 13,
+        background: "transparent",
+        border: "none",
+        borderRadius: 6,
+        color: danger ? "var(--error)" : "var(--text-primary)",
+        cursor: "pointer",
+        textAlign: "left",
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background =
+          "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background =
+          "transparent";
+      }}
+    >
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          color: "var(--text-secondary)",
+        }}
+      >
+        {icon}
+      </span>
+      {label}
+    </button>
   );
 }
 
@@ -1288,4 +1769,263 @@ function formatMsStatic(ms: number) {
   const m = Math.floor(s / 60);
   if (m > 0) return `${m}m ${s % 60}s`;
   return `${s}s`;
+}
+
+// ---------------------------------------------------------------------------
+// Event Timeline — horizontal waterfall showing every event as a marker
+// ---------------------------------------------------------------------------
+
+type TranscriptRole = "user" | "agent" | "interrupt" | "other";
+
+function transcriptRoleFor(rawType: string): TranscriptRole {
+  if (rawType === "user.message") return "user";
+  if (rawType === "agent.message" || rawType === "agent.thinking")
+    return "agent";
+  if (rawType === "user.interrupt") return "interrupt";
+  return "other";
+}
+
+function timelineColor(ev: ReplayEvent): string {
+  const t = ev.rawType;
+  if (t === "user.message") return "#F472B6"; // pink — user input
+  if (t === "user.interrupt") return "#FBBF24"; // amber — interrupt
+  if (t === "agent.message") return "#60A5FA"; // blue — agent reply
+  if (t === "agent.thinking") return "#A78BFA"; // violet — thinking
+  if (
+    t === "agent.tool_use" ||
+    t === "agent.mcp_tool_use" ||
+    t === "agent.custom_tool_use"
+  )
+    return "#F59E0B"; // amber — tool use
+  if (t === "agent.tool_result" || t === "agent.mcp_tool_result")
+    return "#10B981"; // green — tool result
+  if (t === "session.error") return "#EF4444"; // red — error
+  if (t?.startsWith("span.")) return "#6B7280"; // gray — model request spans
+  if (t?.startsWith("session.status_")) return "#4B5563"; // dimmer gray — status
+  return "#374151";
+}
+
+function formatOffsetClock(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+function RoleBadge({ role }: { role: TranscriptRole }) {
+  const map: Record<
+    TranscriptRole,
+    { label: string; bg: string; color: string }
+  > = {
+    user: {
+      label: "User",
+      bg: "rgba(244, 114, 182, 0.15)",
+      color: "#F472B6",
+    },
+    agent: {
+      label: "Agent",
+      bg: "rgba(96, 165, 250, 0.15)",
+      color: "#60A5FA",
+    },
+    interrupt: {
+      label: "Interrupt",
+      bg: "var(--bg-badge)",
+      color: "var(--text-secondary)",
+    },
+    other: {
+      label: "Event",
+      bg: "var(--bg-badge)",
+      color: "var(--text-muted)",
+    },
+  };
+  const cfg = map[role];
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "2px 8px",
+        borderRadius: 4,
+        fontSize: 11,
+        fontWeight: 600,
+        color: cfg.color,
+        background: cfg.bg,
+        width: "fit-content",
+      }}
+    >
+      {cfg.label}
+    </span>
+  );
+}
+
+function EventTimeline({
+  events,
+  selectedIndex,
+  onSelect,
+  totalDurationMs,
+}: {
+  events: ReplayEvent[];
+  selectedIndex: number;
+  onSelect: (i: number) => void;
+  totalDurationMs: number;
+}) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  if (events.length === 0) {
+    return (
+      <div
+        style={{
+          height: 28,
+          marginBottom: 12,
+          background: "var(--bg-input)",
+          border: "1px solid var(--border-color)",
+          borderRadius: 6,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-muted)",
+          fontSize: 12,
+        }}
+      >
+        No events yet
+      </div>
+    );
+  }
+
+  const maxOffset = events[events.length - 1]?.offsetMs ?? totalDurationMs ?? 1;
+  const denom = Math.max(1, maxOffset);
+  const hoverEv = hoverIdx !== null ? events[hoverIdx] : null;
+  const hoverLeftPct =
+    hoverEv !== null ? (hoverEv.offsetMs / denom) * 100 : 0;
+
+  return (
+    <div
+      ref={containerRef}
+      style={{
+        position: "relative",
+        height: 28,
+        marginBottom: 12,
+        background: "var(--bg-input)",
+        border: "1px solid var(--border-color)",
+        borderRadius: 6,
+      }}
+    >
+      {events.map((ev, i) => {
+        const left = `${(ev.offsetMs / denom) * 100}%`;
+        const isSel = i === selectedIndex;
+        const isHover = i === hoverIdx;
+        return (
+          <button
+            key={ev.id}
+            type="button"
+            onClick={() => onSelect(i)}
+            onMouseEnter={() => setHoverIdx(i)}
+            onMouseLeave={() =>
+              setHoverIdx((prev) => (prev === i ? null : prev))
+            }
+            aria-label={`Jump to ${ev.rawType}`}
+            style={{
+              position: "absolute",
+              left,
+              top: isSel || isHover ? 0 : 4,
+              bottom: isSel || isHover ? 0 : 4,
+              width: isSel || isHover ? 5 : 3,
+              padding: 0,
+              border: "none",
+              background: timelineColor(ev),
+              opacity: isSel ? 1 : isHover ? 0.95 : 0.75,
+              borderRadius: 1,
+              cursor: "pointer",
+              transform: "translateX(-50%)",
+              outline: isSel ? "2px solid var(--accent)" : "none",
+              outlineOffset: 1,
+              zIndex: isSel || isHover ? 3 : 1,
+            }}
+          />
+        );
+      })}
+
+      {/* Hover tooltip */}
+      {hoverEv && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 8px)",
+            left: `${hoverLeftPct}%`,
+            transform: `translateX(${
+              hoverLeftPct > 85 ? "-90%" : hoverLeftPct < 15 ? "-10%" : "-50%"
+            })`,
+            padding: "8px 10px",
+            background: "var(--bg-card)",
+            border: "1px solid var(--border-color)",
+            borderRadius: 6,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+            fontSize: 12,
+            color: "var(--text-primary)",
+            whiteSpace: "nowrap",
+            zIndex: 10,
+            pointerEvents: "none",
+            maxWidth: 360,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginBottom: 4,
+            }}
+          >
+            <span
+              style={{
+                display: "inline-block",
+                width: 8,
+                height: 8,
+                borderRadius: 2,
+                background: timelineColor(hoverEv),
+              }}
+            />
+            <code
+              style={{
+                fontFamily: "monospace",
+                fontSize: 11,
+                color: "var(--text-secondary)",
+              }}
+            >
+              {hoverEv.rawType}
+            </code>
+          </div>
+          {hoverEv.description && (
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--text-primary)",
+                maxWidth: 340,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {hoverEv.description}
+            </div>
+          )}
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              marginTop: 4,
+              fontFamily: "monospace",
+            }}
+          >
+            +{formatMsStatic(hoverEv.offsetMs)} ·{" "}
+            {formatOffsetClock(hoverEv.offsetMs)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

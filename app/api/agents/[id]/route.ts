@@ -22,7 +22,7 @@ export async function GET(
 
 /**
  * PATCH /api/agents/:id
- * Update an existing agent. Accepts any updatable fields.
+ * Update an existing agent. Auto-fetches current version for concurrency control.
  */
 export async function PATCH(
   request: Request,
@@ -32,7 +32,15 @@ export async function PATCH(
     const { id } = await params;
     const body = await request.json();
     const client = getClient();
-    const agent = await client.beta.agents.update(id, body);
+
+    // If no version provided, fetch current agent to get it
+    let version = body.version;
+    if (version == null) {
+      const current = await client.beta.agents.retrieve(id);
+      version = (current as any).version;
+    }
+
+    const agent = await client.beta.agents.update(id, { ...body, version });
     return NextResponse.json(agent);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to update agent";

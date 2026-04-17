@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { Sun, Moon } from "lucide-react";
+import { Sun, Moon, Calendar } from "lucide-react";
 import { useTheme } from "./ThemeProvider";
 import ConnectionStatus from "./ConnectionStatus";
 
@@ -15,6 +15,7 @@ const routeTitles: Record<string, string> = {
   "/environments/new": "Create Environment",
   "/vaults": "Vaults",
   "/templates": "Templates",
+  "/settings": "Settings",
 };
 
 export default function TopBar() {
@@ -52,6 +53,26 @@ export default function TopBar() {
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         {/* Connection Status */}
         <ConnectionStatus compact />
+
+        {/* Book call */}
+        <a
+          href="https://www.executivestride.com/apply"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-primary"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "8px 14px",
+            fontSize: 13,
+            fontWeight: 600,
+            textDecoration: "none",
+          }}
+        >
+          <Calendar size={14} />
+          Book
+        </a>
 
         {/* Theme toggle */}
         <button

@@ -9,8 +9,15 @@ import TopBar from "@/components/TopBar";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Managed Agents Dashboard",
-  description: "Control panel for Anthropic Managed Agents",
+  title: {
+    default: "Stride Agents | Accelerate Your Stride",
+    template: "%s | Stride Agents",
+  },
+  description: "Stride Agents | Accelerate Your Stride",
+  icons: {
+    icon: "/favicon.ico",
+    shortcut: "/favicon.ico",
+  },
 };
 
 export const viewport: Viewport = {

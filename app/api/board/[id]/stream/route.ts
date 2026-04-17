@@ -7,8 +7,6 @@ import { getTask } from "@/lib/db";
  * Server-Sent Events endpoint that streams real-time events from a task's
  * Anthropic session. The frontend connects using EventSource to watch the
  * agent work on the task.
- *
- * The task must already have a session_id (status = "in_progress").
  */
 export async function GET(
   _request: Request,
@@ -27,11 +25,8 @@ export async function GET(
 
   if (!task.session_id) {
     return new Response(
-      JSON.stringify({ error: "Task has no active session. Start the task first." }),
-      {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      }
+      JSON.stringify({ error: "Task has no active session" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
     );
   }
 
@@ -49,7 +44,6 @@ export async function GET(
       try {
         const client = getClient();
 
-        // Send the current task state as the first event
         sendEvent("task_status", {
           id: task.id,
           title: task.title,
@@ -57,64 +51,24 @@ export async function GET(
           session_id: sessionId,
         });
 
-        // Stream session events using the SDK or polling fallback
-        if (typeof (client.beta.sessions as any).stream === "function") {
-          const eventStream = (client.beta.sessions as any).stream(sessionId);
+        // Use the SDK's event stream
+        const eventStream = await (
+          client.beta as any
+        ).sessions.events.stream(sessionId);
 
-          for await (const event of eventStream) {
-            sendEvent(event.type || "message", event);
-          }
-        } else {
-          // Polling fallback: check for events every 2 seconds
-          let lastEventId: string | undefined;
-          let done = false;
-          let pollCount = 0;
-          const maxPolls = 300; // 10 minutes max at 2s intervals
+        for await (const event of eventStream as AsyncIterable<any>) {
+          sendEvent(event.type || "message", event);
 
-          while (!done && pollCount < maxPolls) {
-            pollCount++;
-
-            try {
-              const listParams: Record<string, unknown> = {};
-              if (lastEventId) {
-                listParams.after = lastEventId;
-              }
-
-              // @ts-expect-error - list_events may not be in current SDK type defs
-              const events = await client.beta.sessions.list_events(sessionId, listParams);
-              const eventList = Array.isArray(events)
-                ? events
-                : (events as unknown as { data?: unknown[] }).data || [];
-
-              for (const event of eventList as Array<{
-                id?: string;
-                type?: string;
-                [key: string]: unknown;
-              }>) {
-                sendEvent(event.type || "message", event);
-                if (event.id) {
-                  lastEventId = event.id;
-                }
-
-                if (
-                  event.type === "session.completed" ||
-                  event.type === "session.failed"
-                ) {
-                  done = true;
-                }
-              }
-
-              if (!done) {
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-              }
-            } catch {
-              // Stop polling on error
-              done = true;
-            }
+          // Stop on terminal events
+          if (
+            event.type === "session.status_idle" ||
+            event.type === "session.status_terminated" ||
+            event.type === "session.deleted"
+          ) {
+            break;
           }
         }
 
-        // Refresh the task to send the final status
         const finalTask = getTask(taskId);
         sendEvent("task_complete", {
           id: taskId,
@@ -125,7 +79,8 @@ export async function GET(
         sendEvent("done", { status: "stream_complete" });
         controller.close();
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : "Stream error";
+        const message =
+          error instanceof Error ? error.message : "Stream error";
         sendEvent("error", { error: message });
         controller.close();
       }

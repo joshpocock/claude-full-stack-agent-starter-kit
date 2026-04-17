@@ -9,7 +9,7 @@ export interface BundledSkill {
   name: string;
   description: string;
   author: string;
-  source: "bundled" | "anthropic" | "github";
+  source: "bundled" | "anthropic" | "github" | "custom";
   category: string;
   content: string;
   anthropic_skill_id?: string;
@@ -344,18 +344,18 @@ Attach this skill to an agent and point it at a codebase or specific files. The 
 
 /**
  * GET /api/skills
- * Returns bundled skills plus any imported GitHub skills stored in SQLite,
- * and Anthropic official skills from the Skills API.
+ * Returns bundled skills plus any imported/custom skills stored in SQLite,
+ * real custom skills from Anthropic Skills API, and official Anthropic skills
+ * from the GitHub repo.
  */
 export async function GET() {
   try {
-    // Try to load GitHub-imported skills from SQLite
+    // Load locally-tracked skills from SQLite
     let importedSkills: BundledSkill[] = [];
     try {
       const { getDb } = await import("@/lib/db");
       const db = getDb();
 
-      // Ensure the skills table exists
       db.exec(`
         CREATE TABLE IF NOT EXISTS imported_skills (
           id TEXT PRIMARY KEY,
@@ -374,7 +374,30 @@ export async function GET() {
         .prepare("SELECT * FROM imported_skills ORDER BY created_at DESC")
         .all() as BundledSkill[];
     } catch {
-      // SQLite not available or table doesn't exist yet
+      // SQLite not available
+    }
+
+    // Fetch real custom skills from Anthropic Skills API
+    let apiCustomSkills: BundledSkill[] = [];
+    try {
+      const { listSkills } = await import("@/lib/skills-api");
+      const apiSkills = await listSkills();
+      const importedIds = new Set(importedSkills.map((s) => s.id));
+
+      // Only add API skills that aren't already in our local DB
+      apiCustomSkills = apiSkills
+        .filter((s) => s.source === "custom" && !importedIds.has(s.id))
+        .map((s) => ({
+          id: s.id,
+          name: s.display_title,
+          description: `Custom skill uploaded to Anthropic`,
+          author: "Custom",
+          source: "custom" as const,
+          category: "Custom",
+          content: "",
+        }));
+    } catch {
+      // Skills API not available
     }
 
     // Fetch official Anthropic skills from github.com/anthropics/skills
@@ -429,7 +452,7 @@ export async function GET() {
             });
 
           const results = await Promise.all(skillPromises);
-          anthropicSkills = results.filter((s): s is BundledSkill => s !== null);
+          anthropicSkills = results.filter((s) => s !== null) as BundledSkill[];
         }
       }
     } catch {
@@ -440,6 +463,7 @@ export async function GET() {
       ...BUNDLED_SKILLS,
       ...anthropicSkills,
       ...importedSkills,
+      ...apiCustomSkills,
     ]);
   } catch (error: unknown) {
     const message =
@@ -450,7 +474,8 @@ export async function GET() {
 
 /**
  * POST /api/skills
- * Import a skill from a GitHub repository.
+ * Import a skill from a GitHub repository. Fetches SKILL.md/README.md,
+ * uploads to Anthropic Skills API, and stores locally.
  * Body: { github_url: string }
  */
 export async function POST(request: Request) {
@@ -471,9 +496,7 @@ export async function POST(request: Request) {
 
     const urlStr = github_url.trim();
     if (urlStr.includes("github.com")) {
-      const match = urlStr.match(
-        /github\.com\/([^/]+)\/([^/]+)/
-      );
+      const match = urlStr.match(/github\.com\/([^/]+)\/([^/]+)/);
       if (!match) {
         return NextResponse.json(
           { error: "Invalid GitHub URL format" },
@@ -493,28 +516,34 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fetch SKILL.md from the repo root
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/main/SKILL.md`;
-    const fallbackUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/SKILL.md`;
+    // Fetch SKILL.md or README.md
+    const candidates = [
+      `https://raw.githubusercontent.com/${owner}/${repo}/main/SKILL.md`,
+      `https://raw.githubusercontent.com/${owner}/${repo}/master/SKILL.md`,
+      `https://raw.githubusercontent.com/${owner}/${repo}/main/README.md`,
+      `https://raw.githubusercontent.com/${owner}/${repo}/master/README.md`,
+    ];
 
     let skillContent = "";
-    let res = await fetch(rawUrl);
-    if (!res.ok) {
-      res = await fetch(fallbackUrl);
+    for (const url of candidates) {
+      const res = await fetch(url);
+      if (res.ok) {
+        skillContent = await res.text();
+        break;
+      }
     }
-    if (!res.ok) {
+    if (!skillContent) {
       return NextResponse.json(
-        { error: "Could not find SKILL.md in the repository. Tried main and master branches." },
+        { error: "Could not find SKILL.md or README.md in the repository." },
         { status: 404 }
       );
     }
-    skillContent = await res.text();
 
     // Extract name from first heading or use repo name
     const nameMatch = skillContent.match(/^#\s+(.+)$/m);
     const skillName = nameMatch ? nameMatch[1].trim() : repo;
 
-    // Extract first paragraph as description
+    // Extract description
     const lines = skillContent.split("\n").filter((l) => l.trim());
     let description = `Imported from ${owner}/${repo}`;
     for (const line of lines) {
@@ -524,16 +553,42 @@ export async function POST(request: Request) {
       }
     }
 
-    const id = `github-${owner}-${repo}-${Date.now()}`;
+    const dirName = repo
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
 
-    const skill: BundledSkill = {
+    // Ensure proper SKILL.md frontmatter
+    let finalContent = skillContent;
+    if (!skillContent.startsWith("---")) {
+      finalContent = `---\nname: ${dirName}\ndescription: ${description}\n---\n\n${skillContent}`;
+    }
+
+    // Upload to Anthropic Skills API
+    let anthropicId: string | null = null;
+    try {
+      const { uploadSkill } = await import("@/lib/skills-api");
+      const uploaded = await uploadSkill({
+        displayTitle: skillName,
+        skillMdContent: finalContent,
+        dirName,
+      });
+      anthropicId = uploaded.id;
+    } catch (err) {
+      console.error("Skills API upload failed:", err);
+    }
+
+    const id = anthropicId || `github-${owner}-${repo}-${Date.now()}`;
+
+    const skill: BundledSkill & { anthropic_skill_id?: string } = {
       id,
       name: skillName,
       description,
       author: owner,
-      source: "github",
+      source: anthropicId ? "custom" as any : "github",
       category: "Community",
-      content: skillContent,
+      content: finalContent,
+      anthropic_skill_id: anthropicId || undefined,
     };
 
     // Store in SQLite
@@ -554,11 +609,11 @@ export async function POST(request: Request) {
         )
       `);
       db.prepare(
-        `INSERT INTO imported_skills (id, name, description, author, source, category, content, github_url)
+        `INSERT OR REPLACE INTO imported_skills (id, name, description, author, source, category, content, github_url)
          VALUES (@id, @name, @description, @author, @source, @category, @content, @github_url)`
       ).run({ ...skill, github_url: `https://github.com/${owner}/${repo}` });
     } catch {
-      // If DB fails, still return the skill (it won't persist)
+      // best effort
     }
 
     return NextResponse.json(skill, { status: 201 });

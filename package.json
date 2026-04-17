@@ -4,12 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:tunnel": "node scripts/dev-with-tunnel.mjs",
     "build": "next build",
     "start": "next start"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
+    "@types/js-yaml": "^4.0.9",
     "better-sqlite3": "^11.0.0",
+    "js-yaml": "^4.1.1",
     "lucide-react": "^0.460.0",
     "next": "^15.0.0",
     "react": "^19.0.0",
@@ -20,6 +23,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "untun": "^0.1.3"
   }
 }

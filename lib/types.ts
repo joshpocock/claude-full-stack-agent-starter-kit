@@ -3,16 +3,30 @@
 // These mirror the shapes returned by the SDK beta methods.
 // ---------------------------------------------------------------------------
 
+export type AgentModel =
+  | string
+  | { id: string; speed?: "standard" | "fast" | null };
+
 export interface Agent {
   id: string;
   name: string;
   description?: string;
-  model: string;
+  model: AgentModel;
   system?: string;
   tools?: AgentTool[];
   mcp_servers?: McpServer[];
   created_at?: string;
   updated_at?: string;
+}
+
+/**
+ * The Managed Agents API returns `model` as an object `{ id, speed }`, but
+ * older code and form state treat it as a plain string id. This helper
+ * normalizes either form to a string id for rendering and API writes.
+ */
+export function getModelId(model: AgentModel | undefined): string {
+  if (!model) return "";
+  return typeof model === "string" ? model : model.id;
 }
 
 export interface AgentTool {

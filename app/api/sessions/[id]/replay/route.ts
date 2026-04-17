@@ -28,79 +28,107 @@ export async function GET(
     // Fetch events for the session
     let events: Array<Record<string, unknown>> = [];
     try {
-      // @ts-expect-error - list_events may not be in current SDK type defs
-      const eventData = await client.beta.sessions.list_events(id, {});
-      const rawEvents = Array.isArray(eventData)
-        ? eventData
-        : (eventData as unknown as { data?: unknown[] }).data || [];
-
-      // Process events into replay format
-      let baseTime: number | null = null;
-      events = (rawEvents as Array<Record<string, unknown>>).map(
-        (event, index) => {
-          const timestamp = (event.created_at as string) || new Date().toISOString();
-          const eventTime = new Date(timestamp).getTime();
-
-          if (baseTime === null) baseTime = eventTime;
-          const offsetMs = eventTime - (baseTime || 0);
-
-          let eventType = "unknown";
-          let description = "";
-          let detail = event;
-
-          const type = event.type as string;
-
-          if (
-            type === "content_block_start" &&
-            (event.content_block as Record<string, unknown>)?.type === "tool_use"
-          ) {
-            eventType = "tool_use";
-            description = `Tool: ${(event.content_block as Record<string, unknown>)?.name || "unknown"}`;
-          } else if (type === "content_block_delta") {
-            const delta = event.delta as Record<string, unknown>;
-            if (delta?.type === "text_delta") {
-              eventType = "text";
-              description = ((delta.text as string) || "").substring(0, 100);
-            } else if (delta?.type === "input_json_delta") {
-              eventType = "tool_use";
-              description = "Tool input data";
-            }
-          } else if (type === "message_start") {
-            eventType = "status";
-            description = "Agent started processing";
-          } else if (type === "message_stop") {
-            eventType = "status";
-            description = "Agent finished processing";
-          } else if (type === "session.completed") {
-            eventType = "status";
-            description = "Session completed";
-          } else if (type === "session.failed") {
-            eventType = "error";
-            description =
-              (event.error as Record<string, unknown>)?.message as string ||
-              "Session failed";
-          } else if (type === "error") {
-            eventType = "error";
-            description =
-              ((event.error as Record<string, unknown>)?.message as string) ||
-              "Error occurred";
-          } else {
-            eventType = "status";
-            description = type || "Event";
-          }
-
-          return {
-            id: (event.id as string) || `event-${index}`,
-            index,
-            type: eventType,
-            rawType: type,
-            description,
-            timestamp,
-            offsetMs,
-            detail,
-          };
+      const rawEvents: Array<Record<string, unknown>> = [];
+      const page = (await (client.beta as any).sessions.events.list(id, {})) as any;
+      if (Array.isArray(page?.data)) {
+        rawEvents.push(...page.data);
+      } else if (page && typeof page[Symbol.asyncIterator] === "function") {
+        for await (const ev of page as AsyncIterable<Record<string, unknown>>) {
+          rawEvents.push(ev);
         }
-      );
+      }
+
+      // Process Managed Agents session events into replay-friendly format
+      let baseTime: number | null = null;
+      events = rawEvents.map((event, index) => {
+        const timestamp =
+          (event.processed_at as string) ||
+          (event.created_at as string) ||
+          new Date().toISOString();
+        const eventTime = new Date(timestamp).getTime();
+
+        if (baseTime === null) baseTime = eventTime;
+        const offsetMs = eventTime - (baseTime || 0);
+
+        let eventType = "status";
+        let description = "";
+        const detail = event;
+
+        const type = event.type as string;
+        const firstText = (): string => {
+          const content = event.content as Array<Record<string, unknown>> | undefined;
+          if (!Array.isArray(content)) return "";
+          const block = content.find((c) => c.type === "text");
+          return (block?.text as string) || "";
+        };
+
+        if (type === "user.message") {
+          eventType = "text";
+          description = firstText().substring(0, 100) || "User message";
+        } else if (type === "agent.message") {
+          eventType = "text";
+          description = firstText().substring(0, 100) || "Agent message";
+        } else if (type === "agent.thinking") {
+          eventType = "status";
+          description = "Agent thinking";
+        } else if (
+          type === "agent.tool_use" ||
+          type === "agent.mcp_tool_use" ||
+          type === "agent.custom_tool_use"
+        ) {
+          eventType = "tool_use";
+          description = `Tool: ${(event.name as string) || (event.tool_name as string) || "unknown"}`;
+        } else if (
+          type === "agent.tool_result" ||
+          type === "agent.mcp_tool_result"
+        ) {
+          eventType = "tool_use";
+          description = "Tool result";
+        } else if (type === "span.model_request_start") {
+          eventType = "status";
+          description = "Model request started";
+        } else if (type === "span.model_request_end") {
+          eventType = "status";
+          const usage = event.model_usage as Record<string, number> | undefined;
+          const inTok = usage?.input_tokens ?? 0;
+          const outTok = usage?.output_tokens ?? 0;
+          description = `Model request done · ${inTok} in / ${outTok} out`;
+        } else if (type === "session.status_running") {
+          eventType = "status";
+          description = "Session running";
+        } else if (type === "session.status_idle") {
+          eventType = "status";
+          description = "Session idle";
+        } else if (type === "session.status_terminated") {
+          eventType = "status";
+          description = "Session terminated";
+        } else if (type === "session.status_rescheduled") {
+          eventType = "status";
+          description = "Session rescheduled";
+        } else if (type === "user.interrupt") {
+          eventType = "status";
+          description = "Interrupt";
+        } else if (type === "session.error") {
+          eventType = "error";
+          description =
+            ((event.error as Record<string, unknown>)?.message as string) ||
+            (event.message as string) ||
+            "Session error";
+        } else {
+          description = type || "Event";
+        }
+
+        return {
+          id: (event.id as string) || `event-${index}`,
+          index,
+          type: eventType,
+          rawType: type,
+          description,
+          timestamp,
+          offsetMs,
+          detail,
+        };
+      });
     } catch {
       // Events may not be available
     }
@@ -123,12 +151,19 @@ export async function GET(
       }
     }
 
+    const s = session as unknown as Record<string, unknown>;
+    const agentObj = s.agent as Record<string, unknown> | undefined;
+    const envObj = s.environment as Record<string, unknown> | undefined;
     return NextResponse.json({
       session: {
-        id: (session as unknown as Record<string, unknown>).id || id,
-        agent_id: (session as unknown as Record<string, unknown>).agent_id,
-        status: (session as unknown as Record<string, unknown>).status || "unknown",
-        created_at: (session as unknown as Record<string, unknown>).created_at,
+        id: (s.id as string) || id,
+        agent_id: (agentObj?.id as string) || (s.agent_id as string) || null,
+        environment_id:
+          (envObj?.id as string) || (s.environment_id as string) || null,
+        status: (s.status as string) || "unknown",
+        created_at: s.created_at as string,
+        updated_at: s.updated_at as string,
+        archived_at: s.archived_at as string | null,
         durationMs,
         tokenEstimate,
       },

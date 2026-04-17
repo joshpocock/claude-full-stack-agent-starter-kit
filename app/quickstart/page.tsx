@@ -62,7 +62,15 @@ const STEPS = [
 // ---------------------------------------------------------------------------
 
 function highlightYaml(text: string): string {
+  // IMPORTANT: comment replacement must run FIRST. Otherwise the `#` in the
+  // hex colors we inject for strings/numbers (e.g. `style="color: #6ec96e"`)
+  // gets mistaken for a YAML comment and wrapped again, producing malformed
+  // HTML that leaks raw hex codes and attribute fragments into the output.
   return text
+    .replace(
+      /(#.*$)/gm,
+      '<span style="color: var(--text-muted)">$1</span>'
+    )
     .replace(
       /^(\s*)([\w_-]+)(:)/gm,
       '$1<span style="color: var(--accent)">$2</span>$3'
@@ -82,10 +90,6 @@ function highlightYaml(text: string): string {
     .replace(
       /:\s*(\d+)/g,
       ': <span style="color: #d19a66">$1</span>'
-    )
-    .replace(
-      /(#.*$)/gm,
-      '<span style="color: var(--text-muted)">$1</span>'
     );
 }
 
@@ -107,6 +111,91 @@ function highlightJson(text: string): string {
       /:\s*(\d+)/g,
       ': <span style="color: #d19a66">$1</span>'
     );
+}
+
+/**
+ * Renders a block of code with a left-side line-number gutter, like a real
+ * editor. Each line is highlighted independently so line-wrapping never
+ * throws the numbers off; long lines scroll horizontally instead of wrapping.
+ */
+function CodeWithLineNumbers({
+  text,
+  format,
+}: {
+  text: string;
+  format: "yaml" | "json" | "plain";
+}) {
+  const lines = text.length === 0 ? [""] : text.split("\n");
+  const highlight =
+    format === "yaml"
+      ? highlightYaml
+      : format === "json"
+        ? highlightJson
+        : (s: string) =>
+            s.replace(
+              /[&<>]/g,
+              (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string
+            );
+  const gutterWidth = Math.max(2, String(lines.length).length) * 8 + 20;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        fontFamily:
+          "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
+        fontSize: 12.5,
+        lineHeight: 1.6,
+        color: "var(--text-primary)",
+        overflow: "auto",
+        minHeight: "100%",
+      }}
+    >
+      {/* Gutter */}
+      <div
+        aria-hidden
+        style={{
+          flexShrink: 0,
+          width: gutterWidth,
+          padding: "0 10px 0 4px",
+          textAlign: "right",
+          userSelect: "none",
+          color: "var(--text-muted)",
+          borderRight: "1px solid var(--border-color)",
+          background: "var(--bg-primary)",
+          fontVariantNumeric: "tabular-nums",
+          position: "sticky",
+          left: 0,
+          zIndex: 1,
+        }}
+      >
+        {lines.map((_, i) => (
+          <div key={i} style={{ whiteSpace: "pre" }}>
+            {i + 1}
+          </div>
+        ))}
+      </div>
+
+      {/* Code */}
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: "0 16px",
+        }}
+      >
+        {lines.map((line, i) => (
+          <div
+            key={i}
+            style={{ whiteSpace: "pre", minHeight: "1.6em" }}
+            dangerouslySetInnerHTML={{
+              __html: line.length === 0 ? "&nbsp;" : highlight(line),
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function toYaml(obj: Record<string, unknown>, indent = 0): string {
@@ -1568,24 +1657,15 @@ console.log(response);`,
           <div
             style={{
               flex: 1,
-              overflowY: "auto",
-              padding: 16,
+              display: "flex",
+              overflow: "hidden",
             }}
           >
             {state.step < 4 ? (
               Object.keys(state.config).length > 0 ? (
-                <pre
-                  style={{
-                    margin: 0,
-                    fontFamily:
-                      "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-                    fontSize: 12.5,
-                    lineHeight: 1.6,
-                    color: "var(--text-primary)",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                  dangerouslySetInnerHTML={{ __html: highlightedConfig }}
+                <CodeWithLineNumbers
+                  text={configText}
+                  format={configFormat}
                 />
               ) : (
                 <div
@@ -1594,7 +1674,7 @@ console.log(response);`,
                     flexDirection: "column",
                     alignItems: "center",
                     justifyContent: "center",
-                    height: "100%",
+                    width: "100%",
                     gap: 12,
                     color: "var(--text-muted)",
                   }}
@@ -1606,20 +1686,10 @@ console.log(response);`,
                 </div>
               )
             ) : (
-              <pre
-                style={{
-                  margin: 0,
-                  fontFamily:
-                    "'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace",
-                  fontSize: 12.5,
-                  lineHeight: 1.6,
-                  color: "var(--text-primary)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
-                }}
-              >
-                {integrationSnippets[integrationTab]}
-              </pre>
+              <CodeWithLineNumbers
+                text={integrationSnippets[integrationTab]}
+                format="plain"
+              />
             )}
           </div>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Shield,
@@ -8,11 +8,14 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
+  MoreHorizontal,
+  Trash2,
 } from "lucide-react";
 import type { Vault } from "@/lib/types";
 import Modal from "@/components/Modal";
 import LoadingSkeleton from "@/components/LoadingSkeleton";
 import EmptyState from "@/components/EmptyState";
+import { useToast } from "@/components/Toast";
 
 type FilterTab = "all" | "active";
 
@@ -20,6 +23,7 @@ const ITEMS_PER_PAGE = 10;
 
 export default function VaultsPage() {
   const router = useRouter();
+  const { showToast } = useToast();
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -27,6 +31,14 @@ export default function VaultsPage() {
   const [createVaultOpen, setCreateVaultOpen] = useState(false);
   const [vaultName, setVaultName] = useState("");
   const [creatingVault, setCreatingVault] = useState(false);
+
+  // Delete vault
+  const [deleteVault, setDeleteVault] = useState<Vault | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // Menu
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   // Filters and pagination
   const [activeTab, setActiveTab] = useState<FilterTab>("all");
@@ -49,9 +61,19 @@ export default function VaultsPage() {
     fetchVaults();
   }, []);
 
+  // Close menu on outside click
+  useEffect(() => {
+    if (!menuOpenId) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpenId(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpenId]);
+
   const filteredVaults = useMemo(() => {
-    // For now all vaults are "active" since the API doesn't have archived status
-    // When activeTab is "active", we still show all (they're all active)
     return vaults;
   }, [vaults, activeTab]);
 
@@ -79,6 +101,25 @@ export default function VaultsPage() {
       }
     } finally {
       setCreatingVault(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteVault) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/vaults/${deleteVault.id}`, { method: "DELETE" });
+      if (res.ok) {
+        setVaults((prev) => prev.filter((v) => v.id !== deleteVault.id));
+        showToast("Vault deleted", "success");
+      } else {
+        showToast("Failed to delete vault", "error");
+      }
+    } catch {
+      showToast("Failed to delete vault", "error");
+    } finally {
+      setDeleting(false);
+      setDeleteVault(null);
     }
   };
 
@@ -209,6 +250,7 @@ export default function VaultsPage() {
                 <th>Name</th>
                 <th>Status</th>
                 <th>Created</th>
+                <th style={{ width: 48 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -226,6 +268,7 @@ export default function VaultsPage() {
                   <td>
                     <LoadingSkeleton height={16} width="70%" />
                   </td>
+                  <td></td>
                 </tr>
               ))}
             </tbody>
@@ -237,14 +280,14 @@ export default function VaultsPage() {
           title="No vaults yet"
           description="Create a credential vault to securely store credentials for your agents."
           actionLabel="New vault"
-          actionHref="#"
+          onAction={() => setCreateVaultOpen(true)}
         />
       ) : (
         <>
           {/* Vaults Table */}
           <div
             className="card"
-            style={{ padding: 0, overflow: "hidden" }}
+            style={{ padding: 0, overflow: "visible", borderRadius: 12 }}
           >
             <table style={{ width: "100%" }}>
               <thead>
@@ -301,6 +344,7 @@ export default function VaultsPage() {
                   >
                     Created
                   </th>
+                  <th style={{ width: 48 }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -374,6 +418,60 @@ export default function VaultsPage() {
                       }}
                     >
                       {formatDate(vault.created_at)}
+                    </td>
+                    <td
+                      style={{ padding: "8px", verticalAlign: "middle", textAlign: "center" }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div
+                        ref={menuOpenId === vault.id ? menuRef : undefined}
+                        style={{ position: "relative", display: "inline-block" }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setMenuOpenId(menuOpenId === vault.id ? null : vault.id)
+                          }
+                          aria-label="More actions"
+                          className="btn-secondary"
+                          style={{
+                            width: 32,
+                            height: 32,
+                            padding: 0,
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+                        {menuOpenId === vault.id && (
+                          <div
+                            style={{
+                              position: "absolute",
+                              top: "calc(100% + 4px)",
+                              right: 0,
+                              minWidth: 160,
+                              background: "var(--bg-card)",
+                              border: "1px solid var(--border-color)",
+                              borderRadius: 8,
+                              boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                              padding: 4,
+                              zIndex: 40,
+                            }}
+                          >
+                            <MenuButton
+                              icon={<Trash2 size={14} />}
+                              label="Delete"
+                              danger
+                              onClick={() => {
+                                setMenuOpenId(null);
+                                setDeleteVault(vault);
+                              }}
+                            />
+                          </div>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -564,6 +662,102 @@ export default function VaultsPage() {
           </div>
         </div>
       </Modal>
+
+      {/* Delete Vault Modal */}
+      <Modal
+        open={deleteVault !== null}
+        onClose={() => setDeleteVault(null)}
+        title="Delete vault"
+      >
+        <p
+          style={{
+            color: "var(--text-secondary)",
+            marginBottom: 20,
+            fontSize: 14,
+          }}
+        >
+          Are you sure you want to delete vault <strong>{deleteVault?.name}</strong>? All
+          credentials in this vault will be permanently removed. This action cannot be undone.
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            onClick={() => setDeleteVault(null)}
+            className="btn-secondary"
+            style={{ padding: "8px 16px", fontSize: 13 }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            style={{
+              background: "var(--error)",
+              color: "#FFFFFF",
+              border: "none",
+              borderRadius: 8,
+              padding: "8px 16px",
+              fontSize: 13,
+              fontWeight: 600,
+              opacity: deleting ? 0.6 : 1,
+              cursor: "pointer",
+            }}
+          >
+            {deleting ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+      </Modal>
     </div>
+  );
+}
+
+function MenuButton({
+  icon,
+  label,
+  onClick,
+  danger,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onClick}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        width: "100%",
+        padding: "9px 12px",
+        fontSize: 13,
+        background: "transparent",
+        border: "none",
+        borderRadius: 6,
+        color: danger ? "var(--error)" : "var(--text-primary)",
+        cursor: "pointer",
+        textAlign: "left",
+      }}
+      onMouseEnter={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background =
+          "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+      }}
+    >
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          color: danger ? "var(--error)" : "var(--text-secondary)",
+        }}
+      >
+        {icon}
+      </span>
+      {label}
+    </button>
   );
 }

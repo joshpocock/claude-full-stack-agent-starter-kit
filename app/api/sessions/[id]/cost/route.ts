@@ -25,35 +25,41 @@ export async function GET(
     // Get session details for model and timing
     const session = await client.beta.sessions.retrieve(id);
 
-    // Get messages to count tokens
-    // @ts-expect-error - list_messages may not be in current SDK type defs
-    const messagesRes = await client.beta.sessions.list_messages(id, {});
-    const messages = Array.isArray(messagesRes)
-      ? messagesRes
-      : (messagesRes as unknown as { data?: unknown[] }).data || [];
+    // Sum tokens across all span.model_request_end events in this session
+    const events: Array<Record<string, unknown>> = [];
+    try {
+      const page = (await (client.beta as any).sessions.events.list(id, {})) as any;
+      if (Array.isArray(page?.data)) {
+        events.push(...page.data);
+      } else if (page && typeof page[Symbol.asyncIterator] === "function") {
+        for await (const ev of page as AsyncIterable<Record<string, unknown>>) {
+          events.push(ev);
+        }
+      }
+    } catch {
+      // Leave events empty on failure
+    }
 
     let inputTokens = 0;
     let outputTokens = 0;
 
-    for (const msg of messages as Array<{
-      role?: string;
-      usage?: { input_tokens?: number; output_tokens?: number };
-      content?: Array<{ type?: string; text?: string }>;
-    }>) {
-      if (msg.usage) {
-        inputTokens += msg.usage.input_tokens || 0;
-        outputTokens += msg.usage.output_tokens || 0;
-      } else if (msg.content) {
-        // Estimate tokens from content text (~4 chars per token)
-        const textLength = msg.content
-          .filter((c) => c.type === "text" && c.text)
-          .reduce((sum, c) => sum + (c.text?.length || 0), 0);
-        const estimatedTokens = Math.ceil(textLength / 4);
-
-        if (msg.role === "user") {
-          inputTokens += estimatedTokens;
-        } else {
-          outputTokens += estimatedTokens;
+    for (const ev of events) {
+      if (ev.type === "span.model_request_end") {
+        const usage = ev.model_usage as Record<string, number> | undefined;
+        if (usage) {
+          inputTokens += usage.input_tokens || 0;
+          outputTokens += usage.output_tokens || 0;
+        }
+      } else if (ev.type === "agent.message" || ev.type === "user.message") {
+        // Fallback: estimate from text if no model_request_end present
+        const content = ev.content as Array<{ type?: string; text?: string }> | undefined;
+        if (Array.isArray(content)) {
+          const textLength = content
+            .filter((c) => c.type === "text" && c.text)
+            .reduce((sum, c) => sum + (c.text?.length || 0), 0);
+          const estimated = Math.ceil(textLength / 4);
+          if (ev.type === "user.message") inputTokens += estimated;
+          else outputTokens += estimated;
         }
       }
     }

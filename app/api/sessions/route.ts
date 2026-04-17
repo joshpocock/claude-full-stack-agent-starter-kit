@@ -12,15 +12,18 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const agentId = searchParams.get("agent_id");
+    const agentVersion = searchParams.get("agent_version");
+    const includeArchived = searchParams.get("include_archived");
+    const createdAfter = searchParams.get("created_after");
 
     const client = getClient();
     const listParams: Record<string, unknown> = {};
-    if (agentId) {
-      listParams.agent_id = agentId;
-    }
+    if (agentId) listParams.agent_id = agentId;
+    if (agentVersion) listParams.agent_version = Number(agentVersion);
+    if (includeArchived === "true") listParams.include_archived = true;
+    if (createdAfter) listParams.created_after = createdAfter;
 
     const response: any = await (client.beta as any).sessions.list(listParams);
-    // Normalize paginated response to plain array
     const sessions = Array.isArray(response)
       ? response
       : (response?.data ?? []);
@@ -51,7 +54,7 @@ export async function POST(request: Request) {
 
     const client = getClient();
     const session = await client.beta.sessions.create({
-      agent_id,
+      agent: agent_id,
       ...(environment_id && { environment_id }),
     });
 

@@ -41,49 +41,97 @@ export async function PATCH(
 
       const client = getClient();
 
-      // Create a session for this task
-      const effectiveEnvId = environment_id || task.environment_id;
+      // environment_id is required. Try the request, the task, or fall back to
+      // the first non-archived environment.
+      let effectiveEnvId = environment_id || task.environment_id;
+      if (!effectiveEnvId) {
+        try {
+          const envResp: any = await (client.beta as any).environments.list();
+          const list: any[] = Array.isArray(envResp)
+            ? envResp
+            : envResp?.data ?? [];
+          const first = list.find((e: any) => !e?.archived_at) ?? list[0];
+          if (first?.id) effectiveEnvId = first.id;
+        } catch {
+          // fall through
+        }
+      }
+      if (!effectiveEnvId) {
+        return NextResponse.json(
+          { error: "environment_id is required. Create one at /environments/new" },
+          { status: 400 }
+        );
+      }
+
       const session = await client.beta.sessions.create({
-        agent_id: effectiveAgentId,
-        ...(effectiveEnvId && { environment_id: effectiveEnvId }),
+        agent: effectiveAgentId,
+        environment_id: effectiveEnvId,
       });
 
-      // Update the task with the session info before sending the message
       updateTask(taskId, {
         status: "in_progress",
         session_id: session.id,
         agent_id: effectiveAgentId,
-        ...(effectiveEnvId && { environment_id: effectiveEnvId }),
+        environment_id: effectiveEnvId,
       });
 
-      // Send the task description as the first message (fire and forget).
-      // The frontend will stream results via /api/board/:id/stream.
-      (client.beta.sessions as any).turn(session.id, {
-          messages: [
-            {
-              role: "user",
-              content: task.description,
-            },
-          ],
-        })
-        .then((response: any) => {
-          // Extract the text result from the response
-          let resultText = "";
-          const resp = response as { content?: Array<{ type: string; text?: string }> };
-          if (resp.content) {
-            resultText = resp.content
-              .filter((block: { type: string }) => block.type === "text")
-              .map((block: { text?: string }) => block.text || "")
-              .join("\n");
-          }
-          updateTask(taskId, { status: "done", result: resultText || "Completed" });
-        })
-        .catch((err: Error) => {
-          updateTask(taskId, {
-            status: "failed",
-            result: `Agent failed: ${err.message}`,
+      // Send the task description and stream agent's response (fire and forget)
+      (async () => {
+        try {
+          const streamPromise = (client.beta as any).sessions.events.stream(
+            session.id
+          );
+
+          await (client.beta as any).sessions.events.send(session.id, {
+            events: [
+              {
+                type: "user.message",
+                content: [
+                  { type: "text", text: task.description || task.title },
+                ],
+              },
+            ],
           });
-        });
+
+          const stream = await streamPromise;
+          const chunks: string[] = [];
+          const TIMEOUT_MS = 180_000;
+          const start = Date.now();
+          let sawRunning = false;
+
+          for await (const ev of stream as AsyncIterable<any>) {
+            if (Date.now() - start > TIMEOUT_MS) break;
+
+            if (ev?.type === "session.status_running") {
+              sawRunning = true;
+            }
+
+            if (ev?.type === "agent.message" && Array.isArray(ev.content)) {
+              for (const block of ev.content) {
+                if (block?.type === "text" && typeof block.text === "string") {
+                  chunks.push(block.text);
+                }
+              }
+            }
+
+            // Only break on idle after the agent has started running
+            if (ev?.type === "session.status_idle" && sawRunning) break;
+            if (ev?.type === "session.error") {
+              const errDetail = ev?.error?.message || ev?.message || ev?.description || JSON.stringify(ev?.error || ev);
+              throw new Error(errDetail);
+            }
+            if (ev?.type === "session.deleted") break;
+          }
+
+          updateTask(taskId, {
+            status: "done",
+            result: chunks.join("") || "Completed",
+          });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Agent failed";
+          updateTask(taskId, { status: "failed", result: `Agent failed: ${msg}` });
+        }
+      })();
 
       const updated = getTask(taskId);
       return NextResponse.json(updated);

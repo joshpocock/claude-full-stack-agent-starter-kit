@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 venv/
 
+docs
+
 # Environment variables (use .env.example as template)
 .env
 .env.local
@@ -14,10 +16,13 @@ venv/
 .next/
 out/
 
-# SQLite databases
+# SQLite databases + WAL journals
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+data/
 
 # Build output
 dist/
