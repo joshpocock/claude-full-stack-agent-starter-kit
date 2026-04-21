@@ -118,8 +118,8 @@ async function fireRoutine(
 
     const data = await res.json();
     return {
-      sessionUrl: data.session_url || data.url,
-      sessionId: data.session_id || data.id,
+      sessionUrl: data.claude_code_session_url || data.session_url || data.url,
+      sessionId: data.claude_code_session_id || data.session_id || data.id,
     };
   } catch (err) {
     return {
@@ -145,32 +145,67 @@ export async function POST(
   }
 
   const { method, id, params: rpcParams } = body;
+  console.log(`[MCP] ${agentId} → ${method}`);
+  const mcpStart = Date.now();
+
+  // MCP session ID (Streamable HTTP transport requires this)
+  const sessionId = request.headers.get("mcp-session-id") || `mcp-${agentId}-${Date.now()}`;
+
+  // Log helper
+  const log = async (toolName?: string, req?: string, res?: string) => {
+    try {
+      const { logMcpCall } = await import("@/lib/db");
+      logMcpCall({
+        agent_id: agentId,
+        method,
+        tool_name: toolName,
+        request: req,
+        response: res,
+        duration_ms: Date.now() - mcpStart,
+      });
+    } catch {}
+  };
 
   // Handle initialize
   if (method === "initialize") {
-    return NextResponse.json({
-      jsonrpc: "2.0",
-      id,
-      result: {
-        protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
-        serverInfo: {
-          name: "stride-routines",
-          version: "1.0.0",
+    log();
+
+    return new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: {
+            name: "stride-routines",
+            version: "1.0.0",
+          },
         },
-      },
-    });
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Mcp-Session-Id": sessionId,
+        },
+      }
+    );
   }
 
   // Handle notifications (no response needed)
   if (method === "notifications/initialized") {
-    return new Response(null, { status: 204 });
+    return new Response(null, {
+      status: 200,
+      headers: { "Mcp-Session-Id": sessionId },
+    });
   }
 
   // Handle tools/list
   if (method === "tools/list") {
     const routines = await getAgentRoutines(agentId);
     const tools = buildTools(routines);
+    log(undefined, undefined, JSON.stringify(tools.map((t) => t.name)));
     return NextResponse.json({
       jsonrpc: "2.0",
       id,
@@ -206,7 +241,10 @@ export async function POST(
       });
     }
 
+    console.log(`[MCP] Firing routine "${routine.routine_name}" (${routine.routine_api_id})`);
     const result = await fireRoutine(routine, args?.context as string);
+    console.log(`[MCP] Result:`, JSON.stringify(result));
+    log(toolName, JSON.stringify(args || {}), JSON.stringify(result));
 
     // Log the run
     try {

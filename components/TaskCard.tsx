@@ -10,16 +10,29 @@ import {
   ExternalLink,
   MessageSquare,
   Play,
+  Bot,
+  Server,
+  Info,
 } from "lucide-react";
 import type { BoardTask } from "@/lib/types";
 import SessionEventLog from "./SessionEventLog";
 import CostTicker from "./CostTicker";
+import Tooltip from "./Tooltip";
 import { useCostTracker } from "@/lib/useCostTracker";
+
+interface AgentInfo {
+  name: string;
+  mcpServers?: string[];
+  skills?: string[];
+  routines?: string[];
+}
 
 interface TaskCardProps {
   task: BoardTask;
   onDragStart: (e: React.DragEvent, taskId: number) => void;
   onStart?: (taskId: number) => void;
+  agentInfo?: AgentInfo;
+  envName?: string;
 }
 
 const statusConfig: Record<
@@ -145,7 +158,8 @@ function renderMarkdown(text: string) {
   return elements;
 }
 
-export default function TaskCard({ task, onDragStart, onStart }: TaskCardProps) {
+export default function TaskCard({ task, onDragStart, onStart, agentInfo, envName }: TaskCardProps) {
+  const agentName = agentInfo?.name;
   const streamUrl =
     task.status === "in_progress" ? `/api/board/${task.id}/stream` : null;
 
@@ -221,6 +235,93 @@ export default function TaskCard({ task, onDragStart, onStart }: TaskCardProps) 
         >
           {task.description}
         </p>
+      )}
+
+      {/* Agent + Environment info */}
+      {(agentName || envName) && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 6,
+            marginTop: 8,
+            marginBottom: 4,
+          }}
+        >
+          {agentName && (
+            <Tooltip
+              content={
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, whiteSpace: "normal", maxWidth: 260 }}>
+                  <div><strong>{agentName}</strong></div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace" }}>
+                    {task.agent_id}
+                  </div>
+                  {agentInfo?.mcpServers && agentInfo.mcpServers.length > 0 && (
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      <strong>MCP:</strong> {agentInfo.mcpServers.join(", ")}
+                    </div>
+                  )}
+                  {agentInfo?.skills && agentInfo.skills.length > 0 && (
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      <strong>Skills:</strong> {agentInfo.skills.join(", ")}
+                    </div>
+                  )}
+                  {agentInfo?.routines && agentInfo.routines.length > 0 && (
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)" }}>
+                      <strong>Routines:</strong> {agentInfo.routines.join(", ")}
+                    </div>
+                  )}
+                </div>
+              }
+            >
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                  background: "var(--bg-badge)",
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  cursor: "default",
+                }}
+              >
+                <Bot size={10} />
+                {agentName}
+              </span>
+            </Tooltip>
+          )}
+          {envName && (
+            <Tooltip
+              content={
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div><strong>Environment:</strong> {envName}</div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "monospace" }}>
+                    {task.environment_id}
+                  </div>
+                </div>
+              }
+            >
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                  background: "var(--bg-badge)",
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  cursor: "default",
+                }}
+              >
+                <Server size={10} />
+                {envName}
+              </span>
+            </Tooltip>
+          )}
+        </div>
       )}
 
       {/* Run button for todo tasks with an agent assigned */}

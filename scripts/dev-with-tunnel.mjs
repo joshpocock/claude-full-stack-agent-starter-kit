@@ -12,9 +12,32 @@
 
 import { spawn } from "child_process";
 import { startTunnel } from "untun";
+import net from "net";
 
-const PORT = process.env.PORT || 3002;
+const START_PORT = Number(process.env.PORT || 3002);
+
+// Find an available port starting from START_PORT
+async function findOpenPort(start) {
+  for (let port = start; port < start + 20; port++) {
+    const free = await new Promise((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => resolve(false));
+      server.once("listening", () => {
+        server.close(() => resolve(true));
+      });
+      server.listen(port, "0.0.0.0");
+    });
+    if (free) return port;
+  }
+  return start;
+}
+
+const PORT = await findOpenPort(START_PORT);
 const LOCAL_URL = `http://localhost:${PORT}`;
+
+if (PORT !== START_PORT) {
+  console.log(`\n  Port ${START_PORT} in use, using ${PORT} instead.`);
+}
 
 // Start Next.js dev server
 console.log(`\n  Starting Next.js on port ${PORT}...\n`);
@@ -42,6 +65,11 @@ setTimeout(async () => {
 
     // Sync MCP servers on agents
     await syncAgentMcpServers(tunnelUrl);
+
+    // Keep writing a heartbeat so the UI can detect when the tunnel goes down.
+    const heartbeat = () => writeTunnelHeartbeat(tunnelUrl);
+    heartbeat();
+    setInterval(heartbeat, 30_000);
   } catch (err) {
     console.error("\n  ✗ Tunnel failed to start:", err.message);
     console.log("  → App still works locally, but MCP won't be reachable from Anthropic");
@@ -83,6 +111,21 @@ async function syncTunnelUrl(url) {
     }
   } catch (err) {
     console.error("  ⚠ Failed to save tunnel URL:", err.message);
+  }
+}
+
+async function writeTunnelHeartbeat(tunnelUrl) {
+  try {
+    await fetch(`${LOCAL_URL}/api/settings`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tunnel_heartbeat_at: new Date().toISOString(),
+        tunnel_url: tunnelUrl,
+      }),
+    });
+  } catch {
+    // best effort
   }
 }
 

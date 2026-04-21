@@ -25,6 +25,7 @@ import { getModelId } from "@/lib/types";
 import AgentEditor, { type AgentConfig } from "@/components/AgentEditor";
 import Modal from "@/components/Modal";
 import LoadingSkeleton from "@/components/LoadingSkeleton";
+import TunnelBanner from "@/components/TunnelBanner";
 import { useToast } from "@/components/Toast";
 
 interface AgentVersion extends Agent {
@@ -1043,6 +1044,9 @@ function AgentTab({
 
         {displayed.mcp_servers && displayed.mcp_servers.length > 0 && (
           <div style={{ marginTop: 10 }}>
+            <TunnelBanner
+              mcpServers={displayed.mcp_servers as Array<{ name?: string; url?: string }>}
+            />
             {displayed.mcp_servers.map((server, i) => (
               <div
                 key={i}
@@ -1274,7 +1278,153 @@ function AgentTab({
           </>
         )}
       </Section>
+
+      {/* MCP Logs */}
+      <McpLogsPanel agentId={agentId} />
     </div>
+  );
+}
+
+function McpLogsPanel({ agentId }: { agentId: string }) {
+  const [logs, setLogs] = useState<Array<{
+    id: number; method: string; tool_name: string | null;
+    request: string | null; response: string | null;
+    duration_ms: number | null; created_at: string;
+  }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/mcp/logs?agent_id=${agentId}&limit=20`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => setLogs(Array.isArray(data) ? data : []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [agentId]);
+
+  if (loading) return null;
+  if (logs.length === 0) return null;
+
+  return (
+    <Section title="MCP Logs">
+      <div
+        style={{
+          border: "1px solid var(--border-color)",
+          borderRadius: 8,
+          overflow: "hidden",
+          maxHeight: 300,
+          overflowY: "auto",
+        }}
+      >
+        {logs.map((log) => {
+          const isCall = log.method === "tools/call";
+          const isExpanded = expanded === log.id;
+          return (
+            <div
+              key={log.id}
+              style={{
+                borderBottom: "1px solid var(--border-color)",
+                fontSize: 12,
+              }}
+            >
+              <div
+                onClick={() => setExpanded(isExpanded ? null : log.id)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 12px",
+                  cursor: "pointer",
+                  background: isCall ? "rgba(34,197,94,0.05)" : "transparent",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-card-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = isCall
+                    ? "rgba(34,197,94,0.05)"
+                    : "transparent";
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: isCall ? "var(--success)" : "var(--text-muted)",
+                    flexShrink: 0,
+                  }}
+                />
+                <code style={{ fontFamily: "monospace", color: "var(--text-primary)" }}>
+                  {log.method}
+                </code>
+                {log.tool_name && (
+                  <span style={{ color: "var(--accent)", fontFamily: "monospace" }}>
+                    {log.tool_name}
+                  </span>
+                )}
+                {log.duration_ms != null && (
+                  <span style={{ color: "var(--text-muted)", marginLeft: "auto" }}>
+                    {log.duration_ms}ms
+                  </span>
+                )}
+                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
+                  {new Date(log.created_at).toLocaleTimeString()}
+                </span>
+              </div>
+              {isExpanded && (log.request || log.response) && (
+                <div
+                  style={{
+                    padding: "8px 12px",
+                    background: "var(--bg-input)",
+                    borderTop: "1px solid var(--border-color)",
+                  }}
+                >
+                  {log.request && (
+                    <div style={{ marginBottom: 6 }}>
+                      <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 2 }}>
+                        REQUEST
+                      </div>
+                      <pre
+                        style={{
+                          margin: 0,
+                          fontSize: 11,
+                          fontFamily: "monospace",
+                          color: "var(--text-secondary)",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                        }}
+                      >
+                        {log.request}
+                      </pre>
+                    </div>
+                  )}
+                  {log.response && (
+                    <div>
+                      <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 2 }}>
+                        RESPONSE
+                      </div>
+                      <pre
+                        style={{
+                          margin: 0,
+                          fontSize: 11,
+                          fontFamily: "monospace",
+                          color: "var(--text-secondary)",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                        }}
+                      >
+                        {log.response}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Section>
   );
 }
 

@@ -58,9 +58,18 @@ export async function POST(request: Request) {
         );
       }
 
+      // Include vault IDs for MCP credential access
+      let vaultIds: string[] = [];
+      try {
+        const { getSetting } = await import("@/lib/db");
+        const vaultId = getSetting("mcp_vault_id");
+        if (vaultId) vaultIds = [vaultId];
+      } catch {}
+
       const newSession = await client.beta.sessions.create({
         agent: agent_id,
         environment_id: resolvedEnvId,
+        ...(vaultIds.length > 0 && { vault_ids: vaultIds }),
       });
 
       const sessionRecord = {
@@ -75,13 +84,43 @@ export async function POST(request: Request) {
     }
 
     const sessionId = session!.session_id;
+    const effectiveAgentId = agent_id || session!.agent_id;
+
+    // If user mentions a routine, add explicit tool-use hint
+    let enrichedMessage = message;
+    try {
+      const { getDb } = await import("@/lib/db");
+      const db = getDb();
+      db.exec(`CREATE TABLE IF NOT EXISTS agent_routines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL,
+        routine_id INTEGER NOT NULL, tool_name TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')), UNIQUE(agent_id, routine_id)
+      )`);
+      const routines = db.prepare(
+        `SELECT ar.tool_name, r.name FROM agent_routines ar
+         JOIN routines r ON ar.routine_id = r.id WHERE ar.agent_id = ?`
+      ).all(effectiveAgentId) as Array<{ tool_name: string; name: string }>;
+
+      if (routines.length > 0) {
+        const msgLower = message.toLowerCase();
+        const matched = routines.filter((r) =>
+          msgLower.includes(r.name.toLowerCase()) || msgLower.includes("routine")
+        );
+        if (matched.length > 0) {
+          const hints = matched
+            .map((r) => `Use MCP tool "${r.tool_name}" for "${r.name}".`)
+            .join(" ");
+          enrichedMessage = `${message}\n\n[System: ${hints} Call the tool - do not just describe it.]`;
+        }
+      }
+    } catch {}
 
     // Send the message
     await (client.beta as any).sessions.events.send(sessionId, {
       events: [
         {
           type: "user.message",
-          content: [{ type: "text", text: message }],
+          content: [{ type: "text", text: enrichedMessage }],
         },
       ],
     });
@@ -102,8 +141,47 @@ export async function POST(request: Request) {
           break;
         }
         if (status === "error") {
+          // Check if it's an MCP init failure - try to get details
+          let errMsg = "Session encountered an error";
+          try {
+            const events = await (client.beta as any).sessions.events.list(sessionId);
+            for await (const ev of events) {
+              if (ev?.type === "session.error") {
+                errMsg = ev?.error?.message || ev?.message || errMsg;
+                break;
+              }
+            }
+          } catch { /* ignore */ }
+
+          // Auto-strip broken MCP server if that's the issue
+          const mcpMatch = errMsg.match(/MCP server '([^']+)' initialize failed/);
+          if (mcpMatch) {
+            const brokenServer = mcpMatch[1];
+            try {
+              const effectiveAgentId = agent_id || session!.agent_id;
+              const agent = await client.beta.agents.retrieve(effectiveAgentId);
+              const version = (agent as any).version;
+              const servers: any[] = (agent as any).mcp_servers || [];
+              const tools: any[] = (agent as any).tools || [];
+
+              await client.beta.agents.update(effectiveAgentId, {
+                version,
+                mcp_servers: servers.filter((s: any) => s.name !== brokenServer),
+                tools: tools.filter((t: any) =>
+                  !(t.type === "mcp_toolset" && t.mcp_server_name === brokenServer)
+                ),
+              });
+
+              return NextResponse.json({
+                chat_id,
+                session_id: sessionId,
+                response: `Removed broken MCP server "${brokenServer}" (credential expired or invalid). Please send your message again.`,
+              });
+            } catch { /* fall through to generic error */ }
+          }
+
           return NextResponse.json(
-            { error: "Session encountered an error" },
+            { error: errMsg },
             { status: 500 }
           );
         }

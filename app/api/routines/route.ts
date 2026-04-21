@@ -35,7 +35,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { name, routine_id, token, description, trigger_type } = body;
+    const { name, routine_id, token, description, trigger_type, cron_schedule } = body;
 
     if (!name || !routine_id || !token) {
       return NextResponse.json(
@@ -50,6 +50,7 @@ export async function POST(request: Request) {
       token,
       description,
       trigger_type,
+      cron_schedule,
     });
 
     return NextResponse.json(

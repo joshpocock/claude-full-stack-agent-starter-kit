@@ -52,8 +52,11 @@ export async function GET() {
 
     for (const session of recentSessions) {
       const sessionId = session.id as string;
-      const agentId = session.agent_id as string;
-      const agentName = agentMap[agentId] || "Unknown Agent";
+      const agentObj = session.agent as { id?: string } | undefined;
+      const agentId = (agentObj?.id as string) || (session.agent_id as string) || "";
+      const agentName =
+        (agentId && agentMap[agentId]) ||
+        (agentId ? `Agent ${agentId.slice(0, 8)}…` : "Unknown Agent");
 
       try {
         // @ts-expect-error - list_events may not be in current SDK type defs

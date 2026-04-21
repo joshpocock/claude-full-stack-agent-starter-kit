@@ -55,6 +55,7 @@ export function getDb(): Database.Database {
         token TEXT NOT NULL,
         description TEXT,
         trigger_type TEXT DEFAULT 'api',
+        cron_schedule TEXT,
         last_fired_at TEXT,
         last_session_url TEXT,
         created_at TEXT DEFAULT (datetime('now'))
@@ -71,12 +72,31 @@ export function getDb(): Database.Database {
         fired_at TEXT DEFAULT (datetime('now'))
       );
 
+      CREATE TABLE IF NOT EXISTS mcp_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL,
+        method TEXT NOT NULL,
+        tool_name TEXT,
+        request TEXT,
+        response TEXT,
+        duration_ms INTEGER,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TEXT DEFAULT (datetime('now'))
       );
     `);
+
+    // Best-effort migrations for databases created before a column existed.
+    // SQLite lacks "ADD COLUMN IF NOT EXISTS", so we swallow the duplicate error.
+    try {
+      db.exec("ALTER TABLE routines ADD COLUMN cron_schedule TEXT");
+    } catch {
+      // column already exists
+    }
   }
   return db;
 }
@@ -271,6 +291,7 @@ export interface Routine {
   token: string;
   description: string | null;
   trigger_type: string;
+  cron_schedule: string | null;
   last_fired_at: string | null;
   last_session_url: string | null;
   created_at: string;
@@ -303,10 +324,11 @@ export function createRoutine(routine: {
   token: string;
   description?: string;
   trigger_type?: string;
+  cron_schedule?: string | null;
 }): Routine {
   const stmt = getDb().prepare(
-    `INSERT INTO routines (name, routine_id, token, description, trigger_type)
-     VALUES (@name, @routine_id, @token, @description, @trigger_type)`
+    `INSERT INTO routines (name, routine_id, token, description, trigger_type, cron_schedule)
+     VALUES (@name, @routine_id, @token, @description, @trigger_type, @cron_schedule)`
   );
   const info = stmt.run({
     name: routine.name,
@@ -314,6 +336,7 @@ export function createRoutine(routine: {
     token: routine.token,
     description: routine.description ?? null,
     trigger_type: routine.trigger_type ?? "api",
+    cron_schedule: routine.cron_schedule ?? null,
   });
   return getRoutine(info.lastInsertRowid as number)!;
 }
@@ -323,12 +346,12 @@ export function createRoutine(routine: {
  */
 export function updateRoutine(
   id: number,
-  updates: Partial<Pick<Routine, "name" | "routine_id" | "token" | "description" | "trigger_type">>
+  updates: Partial<Pick<Routine, "name" | "routine_id" | "token" | "description" | "trigger_type" | "cron_schedule">>
 ): Routine | undefined {
   const fields: string[] = [];
   const values: Record<string, unknown> = { id };
 
-  for (const key of ["name", "routine_id", "token", "description", "trigger_type"] as const) {
+  for (const key of ["name", "routine_id", "token", "description", "trigger_type", "cron_schedule"] as const) {
     if (updates[key] !== undefined) {
       fields.push(`${key} = @${key}`);
       values[key] = updates[key];
@@ -439,4 +462,59 @@ export function getTodayRunCount(): number {
     )
     .get({ today: `${today}T00:00:00` }) as { count: number };
   return row?.count ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// MCP log helpers
+// ---------------------------------------------------------------------------
+
+export interface McpLog {
+  id: number;
+  agent_id: string;
+  method: string;
+  tool_name: string | null;
+  request: string | null;
+  response: string | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export function logMcpCall(entry: {
+  agent_id: string;
+  method: string;
+  tool_name?: string;
+  request?: string;
+  response?: string;
+  duration_ms?: number;
+}): void {
+  getDb()
+    .prepare(
+      `INSERT INTO mcp_logs (agent_id, method, tool_name, request, response, duration_ms)
+       VALUES (@agent_id, @method, @tool_name, @request, @response, @duration_ms)`
+    )
+    .run({
+      agent_id: entry.agent_id,
+      method: entry.method,
+      tool_name: entry.tool_name ?? null,
+      request: entry.request ?? null,
+      response: entry.response ?? null,
+      duration_ms: entry.duration_ms ?? null,
+    });
+}
+
+export function getMcpLogs(opts?: {
+  agentId?: string;
+  limit?: number;
+}): McpLog[] {
+  let sql = "SELECT * FROM mcp_logs WHERE 1=1";
+  const params: Record<string, unknown> = {};
+
+  if (opts?.agentId) {
+    sql += " AND agent_id = @agent_id";
+    params.agent_id = opts.agentId;
+  }
+  sql += " ORDER BY created_at DESC";
+  sql += ` LIMIT ${opts?.limit ?? 50}`;
+
+  return getDb().prepare(sql).all(params) as McpLog[];
 }

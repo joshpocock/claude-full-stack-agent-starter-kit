@@ -64,10 +64,10 @@ export async function GET(
 
         if (type === "user.message") {
           eventType = "text";
-          description = firstText().substring(0, 100) || "User message";
+          description = firstText() || "User message";
         } else if (type === "agent.message") {
           eventType = "text";
-          description = firstText().substring(0, 100) || "Agent message";
+          description = firstText() || "Agent message";
         } else if (type === "agent.thinking") {
           eventType = "status";
           description = "Agent thinking";

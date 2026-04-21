@@ -15,6 +15,7 @@ import {
 import Modal from "@/components/Modal";
 import LoadingSkeleton from "@/components/LoadingSkeleton";
 import EmptyState from "@/components/EmptyState";
+import ScheduleBuilder from "@/components/ScheduleBuilder";
 import { useToast } from "@/components/Toast";
 
 interface Routine {
@@ -24,9 +25,110 @@ interface Routine {
   token: string;
   description: string | null;
   trigger_type: string;
+  cron_schedule: string | null;
   last_fired_at: string | null;
   last_session_url: string | null;
   created_at: string;
+}
+
+interface RoutineRun {
+  id: number;
+  routine_id: number;
+  routine_name: string;
+  status: string;
+  session_id: string | null;
+  session_url: string | null;
+  error: string | null;
+  fired_at: string;
+}
+
+interface UpcomingRun {
+  routine_id: number;
+  routine_name: string;
+  at: string;
+}
+
+function trimError(err: string | null): string {
+  if (!err) return "failed";
+  // Most errors look like "401: {"type":"error","error":{"message":"..."}}"
+  // Pull out the Anthropic message if we can find one, else truncate.
+  const match = err.match(/"message":\s*"([^"]+)"/);
+  const label = match ? match[1] : err;
+  const statusMatch = err.match(/^(\d{3}):/);
+  const prefix = statusMatch ? `${statusMatch[1]} — ` : "";
+  const out = `${prefix}${label}`;
+  return out.length > 120 ? out.slice(0, 117) + "…" : out;
+}
+
+function formatRelativeFuture(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "now";
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return `in ${days}d`;
+}
+
+function SchedulerStatusPill({
+  status,
+}: {
+  status: { connected: boolean; heartbeat_at: string | null } | null;
+}) {
+  const connected = status?.connected === true;
+  const never = !status?.heartbeat_at;
+  return (
+    <span
+      title={
+        never
+          ? "Run `npm run dev:scheduler` (or `npm run dev:all`) to enable cron triggers."
+          : status?.heartbeat_at
+          ? `Last heartbeat: ${new Date(status.heartbeat_at).toLocaleString()}`
+          : undefined
+      }
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "4px 10px",
+        borderRadius: 12,
+        fontSize: 11,
+        fontWeight: 600,
+        border: "1px solid var(--border-color)",
+        background: connected ? "rgba(34, 197, 94, 0.1)" : "var(--bg-card)",
+        color: connected ? "var(--success)" : "var(--text-muted)",
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: connected ? "var(--success)" : "var(--text-muted)",
+        }}
+      />
+      {connected ? "Scheduler connected" : never ? "Scheduler not running" : "Scheduler stale"}
+    </span>
+  );
+}
+
+function describeCron(cron: string | null): string | null {
+  if (!cron) return null;
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  const [m, h, , , dow] = parts;
+  const pad = (n: string) => n.padStart(2, "0");
+  if (h === "*" && /^\d+$/.test(m)) return `Every hour at :${pad(m)}`;
+  if (/^\d+$/.test(h) && /^\d+$/.test(m) && dow === "*")
+    return `Daily at ${pad(h)}:${pad(m)}`;
+  if (/^\d+$/.test(h) && /^\d+$/.test(m) && dow === "1-5")
+    return `Weekdays at ${pad(h)}:${pad(m)}`;
+  if (/^\d+$/.test(h) && /^\d+$/.test(m) && /^\d+$/.test(dow)) {
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    return `${days[Number(dow)]} at ${pad(h)}:${pad(m)}`;
+  }
+  return cron;
 }
 
 const triggerColors: Record<string, { bg: string; color: string }> = {
@@ -46,11 +148,13 @@ export default function RoutinesPage() {
     token: "",
     description: "",
     trigger_type: "api",
+    cron_schedule: null as string | null,
   });
   const [saving, setSaving] = useState(false);
   const [firingId, setFiringId] = useState<number | null>(null);
   const [contextTexts, setContextTexts] = useState<Record<number, string>>({});
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [expandedHistoryId, setExpandedHistoryId] = useState<number | null>(null);
   const [editingRoutine, setEditingRoutine] = useState<Routine | null>(null);
   const [editData, setEditData] = useState({
     name: "",
@@ -58,6 +162,7 @@ export default function RoutinesPage() {
     token: "",
     description: "",
     trigger_type: "api",
+    cron_schedule: null as string | null,
   });
   const [editSaving, setEditSaving] = useState(false);
 
@@ -65,24 +170,43 @@ export default function RoutinesPage() {
   const [tab, setTab] = useState<"all" | "calendar">("all");
   const [todayCount, setTodayCount] = useState(0);
   const [dailyLimit] = useState(15);
-  const [runs, setRuns] = useState<Array<{
-    id: number;
-    routine_id: number;
-    routine_name: string;
-    status: string;
-    session_id: string | null;
-    session_url: string | null;
-    error: string | null;
-    fired_at: string;
-  }>>([]);
+  const [runs, setRuns] = useState<RoutineRun[]>([]);
+  const [upcoming, setUpcoming] = useState<UpcomingRun[]>([]);
+  const [schedulerStatus, setSchedulerStatus] = useState<{
+    connected: boolean;
+    heartbeat_at: string | null;
+  } | null>(null);
 
   const loadRuns = () => {
     fetch("/api/routines/runs?limit=200")
       .then((r) => (r.ok ? r.json() : {}))
-      .then((data: { runs?: typeof runs; today_count?: number }) => {
+      .then((data: { runs?: RoutineRun[]; today_count?: number }) => {
         if (Array.isArray(data.runs)) setRuns(data.runs);
         if (typeof data.today_count === "number")
           setTodayCount(data.today_count);
+      })
+      .catch(() => {});
+  };
+
+  const loadUpcoming = () => {
+    fetch("/api/routines/upcoming?days=7")
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((data: { runs?: UpcomingRun[] }) => {
+        if (Array.isArray(data.runs)) setUpcoming(data.runs);
+      })
+      .catch(() => {});
+  };
+
+  const loadSchedulerStatus = () => {
+    fetch("/api/scheduler/status")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && typeof data.connected === "boolean") {
+          setSchedulerStatus({
+            connected: data.connected,
+            heartbeat_at: data.heartbeat_at ?? null,
+          });
+        }
       })
       .catch(() => {});
   };
@@ -98,7 +222,25 @@ export default function RoutinesPage() {
   useEffect(() => {
     loadRoutines();
     loadRuns();
+    loadUpcoming();
+    loadSchedulerStatus();
+    const statusTimer = setInterval(loadSchedulerStatus, 15_000);
+    const runsTimer = setInterval(() => {
+      loadRuns();
+      loadRoutines();
+    }, 30_000);
+    return () => {
+      clearInterval(statusTimer);
+      clearInterval(runsTimer);
+    };
   }, []);
+
+  // Map of routine_id → most recent run, built from the runs array (already
+  // sorted newest first by the /api/routines/runs endpoint).
+  const lastRunByRoutine = runs.reduce<Record<number, RoutineRun>>((acc, run) => {
+    if (!acc[run.routine_id]) acc[run.routine_id] = run;
+    return acc;
+  }, {});
 
   const handleCreate = async () => {
     if (!formData.name || !formData.routine_id || !formData.token) return;
@@ -111,8 +253,9 @@ export default function RoutinesPage() {
       });
       if (res.ok) {
         setModalOpen(false);
-        setFormData({ name: "", routine_id: "", token: "", description: "", trigger_type: "api" });
+        setFormData({ name: "", routine_id: "", token: "", description: "", trigger_type: "api", cron_schedule: null });
         loadRoutines();
+        loadUpcoming();
         showToast("Routine added", "success");
       } else {
         const err = await res.json().catch(() => ({}));
@@ -189,6 +332,7 @@ export default function RoutinesPage() {
       token: routine.token,
       description: routine.description || "",
       trigger_type: routine.trigger_type,
+      cron_schedule: routine.cron_schedule,
     });
   };
 
@@ -208,6 +352,7 @@ export default function RoutinesPage() {
           prev.map((r) => (r.id === updated.id ? updated : r))
         );
         setEditingRoutine(null);
+        loadUpcoming();
         showToast("Routine updated", "success");
       } else {
         const err = await res.json().catch(() => ({}));
@@ -255,14 +400,17 @@ export default function RoutinesPage() {
             {todayCount} / {dailyLimit} included daily runs used.
           </p>
         </div>
-        <button
-          className="btn-primary"
-          onClick={() => setModalOpen(true)}
-          style={{ display: "flex", alignItems: "center", gap: 8 }}
-        >
-          <Plus size={16} />
-          Add Routine
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <SchedulerStatusPill status={schedulerStatus} />
+          <button
+            className="btn-primary"
+            onClick={() => setModalOpen(true)}
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+          >
+            <Plus size={16} />
+            Add Routine
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -296,7 +444,7 @@ export default function RoutinesPage() {
       </div>
 
       {tab === "calendar" && (
-        <RoutineCalendar runs={runs} routines={routines} />
+        <RoutineCalendar runs={runs} routines={routines} upcoming={upcoming} />
       )}
 
       {tab === "all" && (
@@ -374,7 +522,7 @@ export default function RoutinesPage() {
                   }}
                 >
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
                       <Zap size={16} color="var(--accent)" />
                       <h3 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>
                         {routine.name}
@@ -393,6 +541,26 @@ export default function RoutinesPage() {
                       >
                         {routine.trigger_type}
                       </span>
+                      {lastRunByRoutine[routine.id]?.status === "error" && (
+                        <span
+                          title={lastRunByRoutine[routine.id].error || "Last attempt failed"}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            fontSize: 11,
+                            fontWeight: 600,
+                            padding: "2px 8px",
+                            borderRadius: 10,
+                            background: "rgba(239, 68, 68, 0.12)",
+                            color: "var(--error)",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.5px",
+                          }}
+                        >
+                          Last fire failed
+                        </span>
+                      )}
                     </div>
                     {routine.description && (
                       <p
@@ -525,7 +693,7 @@ export default function RoutinesPage() {
                 </div>
 
                 {/* Status section */}
-                {(routine.last_fired_at || routine.last_session_url) && (
+                {(routine.last_fired_at || routine.last_session_url || routine.cron_schedule || lastRunByRoutine[routine.id]) && (
                   <div
                     style={{
                       borderTop: "1px solid var(--border-color)",
@@ -533,14 +701,73 @@ export default function RoutinesPage() {
                       display: "flex",
                       alignItems: "center",
                       gap: 16,
+                      flexWrap: "wrap",
                       fontSize: 12,
                       color: "var(--text-secondary)",
                     }}
                   >
+                    {routine.cron_schedule && (
+                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <Clock size={12} color="var(--success)" />
+                        {describeCron(routine.cron_schedule)}
+                        <code style={{ marginLeft: 4, fontSize: 11, color: "var(--text-muted)" }}>
+                          {routine.cron_schedule}
+                        </code>
+                      </span>
+                    )}
+                    {routine.cron_schedule && (() => {
+                      const next = upcoming.find((u) => u.routine_id === routine.id);
+                      if (!next) return null;
+                      return (
+                        <span
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "2px 8px",
+                            borderRadius: 10,
+                            background: "rgba(34, 197, 94, 0.1)",
+                            color: "var(--success)",
+                            fontSize: 11,
+                            fontWeight: 600,
+                          }}
+                          title={new Date(next.at).toLocaleString()}
+                        >
+                          Next fires {formatRelativeFuture(next.at)}
+                        </span>
+                      );
+                    })()}
                     {routine.last_fired_at && (
                       <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <Clock size={12} />
                         Last fired: {new Date(routine.last_fired_at).toLocaleString()}
+                      </span>
+                    )}
+                    {lastRunByRoutine[routine.id]?.status === "error" && (
+                      <span
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                          color: "var(--error)",
+                          maxWidth: 360,
+                        }}
+                        title={lastRunByRoutine[routine.id].error || ""}
+                      >
+                        <Clock size={12} />
+                        Last attempt {new Date(lastRunByRoutine[routine.id].fired_at).toLocaleString()}:
+                        <span
+                          style={{
+                            fontFamily: "monospace",
+                            fontSize: 11,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            maxWidth: 220,
+                          }}
+                        >
+                          {trimError(lastRunByRoutine[routine.id].error)}
+                        </span>
                       </span>
                     )}
                     {routine.last_session_url && (
@@ -560,7 +787,30 @@ export default function RoutinesPage() {
                         View Session
                       </a>
                     )}
+                    <button
+                      onClick={() =>
+                        setExpandedHistoryId((id) => (id === routine.id ? null : routine.id))
+                      }
+                      style={{
+                        marginLeft: "auto",
+                        background: "transparent",
+                        border: "none",
+                        color: "var(--accent)",
+                        cursor: "pointer",
+                        fontSize: 12,
+                        padding: 0,
+                      }}
+                    >
+                      {expandedHistoryId === routine.id ? "Hide history" : "Show history"}
+                    </button>
                   </div>
+                )}
+
+                {expandedHistoryId === routine.id && (
+                  <RoutineHistory
+                    routineId={routine.id}
+                    fallbackRuns={runs.filter((r) => r.routine_id === routine.id)}
+                  />
                 )}
               </div>
             );
@@ -575,7 +825,7 @@ export default function RoutinesPage() {
         open={modalOpen}
         onClose={() => {
           setModalOpen(false);
-          setFormData({ name: "", routine_id: "", token: "", description: "", trigger_type: "api" });
+          setFormData({ name: "", routine_id: "", token: "", description: "", trigger_type: "api", cron_schedule: null });
         }}
         title="Add Routine"
       >
@@ -753,13 +1003,25 @@ export default function RoutinesPage() {
             </select>
           </div>
 
+          {/* Schedule */}
+          <div>
+            <label style={modalLabelStyle}>Schedule (optional)</label>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 8px" }}>
+              If set, the local scheduler worker (<code>npm run dev:scheduler</code>) will fire this routine on a cron.
+            </p>
+            <ScheduleBuilder
+              value={formData.cron_schedule}
+              onChange={(cron) => setFormData((p) => ({ ...p, cron_schedule: cron }))}
+            />
+          </div>
+
           {/* Actions */}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 4 }}>
             <button
               className="btn-secondary"
               onClick={() => {
                 setModalOpen(false);
-                setFormData({ name: "", routine_id: "", token: "", description: "", trigger_type: "api" });
+                setFormData({ name: "", routine_id: "", token: "", description: "", trigger_type: "api", cron_schedule: null });
               }}
             >
               Cancel
@@ -873,6 +1135,15 @@ export default function RoutinesPage() {
               <option value="manual">Manual</option>
             </select>
           </div>
+          <div>
+            <label style={modalLabelStyle}>Schedule (optional)</label>
+            <ScheduleBuilder
+              value={editData.cron_schedule}
+              onChange={(cron) =>
+                setEditData((p) => ({ ...p, cron_schedule: cron }))
+              }
+            />
+          </div>
           <div
             style={{
               display: "flex",
@@ -940,17 +1211,11 @@ const modalLabelStyle: React.CSSProperties = {
 function RoutineCalendar({
   runs,
   routines,
+  upcoming,
 }: {
-  runs: Array<{
-    id: number;
-    routine_id: number;
-    routine_name: string;
-    status: string;
-    session_url: string | null;
-    error: string | null;
-    fired_at: string;
-  }>;
+  runs: RoutineRun[];
   routines: Routine[];
+  upcoming: UpcomingRun[];
 }) {
   const today = new Date();
   const days: Date[] = [];
@@ -962,17 +1227,27 @@ function RoutineCalendar({
 
   const dayNames = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
+  const localDateKey = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
   const runsForDate = (date: Date) => {
-    const dateStr = date.toISOString().split("T")[0];
-    return runs.filter((r) => r.fired_at.startsWith(dateStr));
+    const key = localDateKey(date);
+    return runs.filter((r) => localDateKey(new Date(r.fired_at)) === key);
+  };
+
+  const upcomingForDate = (date: Date) => {
+    const key = localDateKey(date);
+    return upcoming.filter((u) => localDateKey(new Date(u.at)) === key);
   };
 
   const [selectedDay, setSelectedDay] = useState(0);
   const selectedDate = days[selectedDay];
   const selectedRuns = runsForDate(selectedDate);
+  const selectedUpcoming = upcomingForDate(selectedDate);
 
   const isToday = (d: Date) =>
     d.toDateString() === today.toDateString();
+  const isPast = (d: Date) => d < today && !isToday(d);
 
   return (
     <div>
@@ -987,7 +1262,8 @@ function RoutineCalendar({
       >
         {days.map((d, i) => {
           const active = i === selectedDay;
-          const hasRuns = runsForDate(d).length > 0;
+          const runCount = runsForDate(d).length;
+          const upcomingCount = upcomingForDate(d).length;
           return (
             <button
               key={i}
@@ -1026,19 +1302,53 @@ function RoutineCalendar({
               >
                 {d.getDate()}
               </div>
-              {hasRuns && (
-                <div
-                  style={{
-                    position: "absolute",
-                    top: 6,
-                    right: 6,
-                    width: 6,
-                    height: 6,
-                    borderRadius: "50%",
-                    background: "var(--accent)",
-                  }}
-                />
-              )}
+              <div
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  right: 4,
+                  display: "flex",
+                  gap: 3,
+                  alignItems: "center",
+                }}
+              >
+                {runCount > 0 && (
+                  <span
+                    title={`${runCount} run${runCount === 1 ? "" : "s"}`}
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      lineHeight: 1,
+                      padding: "3px 5px",
+                      borderRadius: 8,
+                      background: "var(--accent)",
+                      color: "var(--bg-card)",
+                      minWidth: 16,
+                      textAlign: "center",
+                    }}
+                  >
+                    {runCount}
+                  </span>
+                )}
+                {upcomingCount > 0 && (
+                  <span
+                    title={`${upcomingCount} scheduled`}
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      lineHeight: 1,
+                      padding: "3px 5px",
+                      borderRadius: 8,
+                      background: "var(--success)",
+                      color: "var(--bg-card)",
+                      minWidth: 16,
+                      textAlign: "center",
+                    }}
+                  >
+                    {upcomingCount}
+                  </span>
+                )}
+              </div>
             </button>
           );
         })}
@@ -1078,15 +1388,15 @@ function RoutineCalendar({
           </h3>
         </div>
 
-        {selectedRuns.length === 0 ? (
+        {selectedRuns.length === 0 && selectedUpcoming.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
-            No routines {isToday(selectedDate) ? "scheduled" : "ran"}
+            No routines ran or scheduled on this day.
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {selectedRuns.map((run) => (
               <div
-                key={run.id}
+                key={`run-${run.id}`}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -1110,6 +1420,19 @@ function RoutineCalendar({
                     }}
                   />
                   <span style={{ fontWeight: 500 }}>{run.routine_name}</span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.5px",
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                      background: "var(--bg-badge)",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    Ran
+                  </span>
                 </div>
                 <div
                   style={{
@@ -1144,9 +1467,191 @@ function RoutineCalendar({
                 </div>
               </div>
             ))}
+            {!isPast(selectedDate) &&
+              selectedUpcoming.map((u, idx) => (
+                <div
+                  key={`up-${u.routine_id}-${idx}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "10px 12px",
+                    background: "var(--bg-input)",
+                    borderRadius: 8,
+                    fontSize: 13,
+                    border: "1px dashed var(--border-color)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Clock size={14} color="var(--success)" />
+                    <span style={{ fontWeight: 500 }}>{u.routine_name}</span>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px",
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                        background: "rgba(34, 197, 94, 0.1)",
+                        color: "var(--success)",
+                      }}
+                    >
+                      Scheduled
+                    </span>
+                  </div>
+                  <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                    {new Date(u.at).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                </div>
+              ))}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-routine run history (expandable panel under each card)
+// ---------------------------------------------------------------------------
+
+function RoutineHistory({
+  routineId,
+  fallbackRuns,
+}: {
+  routineId: number;
+  fallbackRuns: RoutineRun[];
+}) {
+  const [runs, setRuns] = useState<RoutineRun[]>(fallbackRuns);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/routines/runs?routine_id=${routineId}&limit=50`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .then((data: { runs?: RoutineRun[] }) => {
+        if (cancelled) return;
+        if (Array.isArray(data.runs)) setRuns(data.runs);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [routineId]);
+
+  return (
+    <div
+      style={{
+        borderTop: "1px solid var(--border-color)",
+        padding: "12px 20px",
+        background: "var(--bg-primary)",
+      }}
+    >
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          textTransform: "uppercase",
+          letterSpacing: "0.5px",
+          color: "var(--text-muted)",
+          marginBottom: 10,
+        }}
+      >
+        Run history
+      </div>
+      {loading && runs.length === 0 ? (
+        <LoadingSkeleton height={16} width="40%" />
+      ) : runs.length === 0 ? (
+        <p style={{ fontSize: 13, color: "var(--text-muted)", margin: 0 }}>
+          No runs yet.
+        </p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {runs.map((run) => (
+            <div
+              key={run.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "8px 10px",
+                background: "var(--bg-input)",
+                borderRadius: 6,
+                fontSize: 12,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background:
+                      run.status === "success"
+                        ? "var(--success)"
+                        : "var(--error)",
+                  }}
+                />
+                <span style={{ color: "var(--text-secondary)" }}>
+                  {new Date(run.fired_at).toLocaleString()}
+                </span>
+                {run.error && (
+                  <span
+                    style={{
+                      color: "var(--error)",
+                      maxWidth: 300,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={run.error}
+                  >
+                    {run.error}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {run.session_id && (
+                  <code
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      background: "var(--bg-badge)",
+                      padding: "1px 5px",
+                      borderRadius: 4,
+                    }}
+                  >
+                    {run.session_id.slice(0, 10)}…
+                  </code>
+                )}
+                {run.session_url && (
+                  <a
+                    href={run.session_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      color: "var(--accent)",
+                      textDecoration: "none",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                    }}
+                  >
+                    <ExternalLink size={11} />
+                    View
+                  </a>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

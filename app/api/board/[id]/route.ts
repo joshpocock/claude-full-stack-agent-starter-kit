@@ -63,9 +63,18 @@ export async function PATCH(
         );
       }
 
+      // Include vault IDs for MCP credential access
+      let vaultIds: string[] = [];
+      try {
+        const { getSetting } = await import("@/lib/db");
+        const vaultId = getSetting("mcp_vault_id");
+        if (vaultId) vaultIds = [vaultId];
+      } catch {}
+
       const session = await client.beta.sessions.create({
         agent: effectiveAgentId,
         environment_id: effectiveEnvId,
+        ...(vaultIds.length > 0 && { vault_ids: vaultIds }),
       });
 
       updateTask(taskId, {
@@ -75,66 +84,48 @@ export async function PATCH(
         environment_id: effectiveEnvId,
       });
 
-      // Send the task description and stream agent's response (fire and forget)
-      (async () => {
-        try {
-          const streamPromise = (client.beta as any).sessions.events.stream(
-            session.id
-          );
+      // Check if this task mentions any connected routines - if so, add explicit tool instructions
+      const taskMessage = await enrichWithRoutineHint(
+        task.description || task.title,
+        effectiveAgentId
+      );
 
-          await (client.beta as any).sessions.events.send(session.id, {
-            events: [
-              {
-                type: "user.message",
-                content: [
-                  { type: "text", text: task.description || task.title },
-                ],
-              },
-            ],
-          });
-
-          const stream = await streamPromise;
-          const chunks: string[] = [];
-          const TIMEOUT_MS = 180_000;
-          const start = Date.now();
-          let sawRunning = false;
-
-          for await (const ev of stream as AsyncIterable<any>) {
-            if (Date.now() - start > TIMEOUT_MS) break;
-
-            if (ev?.type === "session.status_running") {
-              sawRunning = true;
-            }
-
-            if (ev?.type === "agent.message" && Array.isArray(ev.content)) {
-              for (const block of ev.content) {
-                if (block?.type === "text" && typeof block.text === "string") {
-                  chunks.push(block.text);
-                }
-              }
-            }
-
-            // Only break on idle after the agent has started running
-            if (ev?.type === "session.status_idle" && sawRunning) break;
-            if (ev?.type === "session.error") {
-              const errDetail = ev?.error?.message || ev?.message || ev?.description || JSON.stringify(ev?.error || ev);
-              throw new Error(errDetail);
-            }
-            if (ev?.type === "session.deleted") break;
-          }
-
-          updateTask(taskId, {
-            status: "done",
-            result: chunks.join("") || "Completed",
-          });
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Agent failed";
-          updateTask(taskId, { status: "failed", result: `Agent failed: ${msg}` });
-        }
-      })();
+      // Send the task and stream agent's response (fire and forget)
+      runAgentTask(client, session.id, taskMessage, taskId, effectiveAgentId);
 
       const updated = getTask(taskId);
       return NextResponse.json(updated);
+    }
+
+    async function enrichWithRoutineHint(message: string, agentId: string): Promise<string> {
+      try {
+        const db = (await import("@/lib/db")).getDb();
+        db.exec(`CREATE TABLE IF NOT EXISTS agent_routines (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL,
+          routine_id INTEGER NOT NULL, tool_name TEXT NOT NULL,
+          created_at TEXT DEFAULT (datetime('now')), UNIQUE(agent_id, routine_id)
+        )`);
+        const routines = db.prepare(
+          `SELECT ar.tool_name, r.name FROM agent_routines ar
+           JOIN routines r ON ar.routine_id = r.id WHERE ar.agent_id = ?`
+        ).all(agentId) as Array<{ tool_name: string; name: string }>;
+
+        if (routines.length === 0) return message;
+
+        const msgLower = message.toLowerCase();
+        const matched = routines.filter((r) =>
+          msgLower.includes(r.name.toLowerCase()) ||
+          msgLower.includes("routine")
+        );
+
+        if (matched.length > 0) {
+          const toolHints = matched
+            .map((r) => `Use the MCP tool "${r.tool_name}" to fire the "${r.name}" routine.`)
+            .join(" ");
+          return `${message}\n\nIMPORTANT: You MUST use your MCP tools to complete this task. ${toolHints} Call the tool NOW - do not just describe what you would do.`;
+        }
+      } catch {}
+      return message;
     }
 
     // For other updates, just apply the fields directly
@@ -174,4 +165,134 @@ export async function DELETE(
     const message = error instanceof Error ? error.message : "Failed to delete task";
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Agent task runner with MCP auto-recovery
+// ---------------------------------------------------------------------------
+
+async function runAgentTask(
+  client: any,
+  sessionId: string,
+  message: string,
+  taskId: number,
+  agentId: string,
+  retryCount = 0
+) {
+  try {
+    const result = await streamAgentResponse(client, sessionId, message);
+    updateTask(taskId, { status: "done", result: result || "Completed" });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Agent failed";
+
+    // Check for MCP init failure - auto-strip the broken server and retry
+    const mcpMatch = msg.match(/MCP server '([^']+)' initialize failed/);
+    if (mcpMatch && retryCount < 2) {
+      const brokenServer = mcpMatch[1];
+      console.log(`Auto-removing broken MCP server "${brokenServer}" from agent ${agentId}`);
+
+      try {
+        const agent = await client.beta.agents.retrieve(agentId);
+        const version = (agent as any).version;
+        const servers: any[] = (agent as any).mcp_servers || [];
+        const tools: any[] = (agent as any).tools || [];
+
+        const updatedServers = servers.filter((s: any) => s.name !== brokenServer);
+        const updatedTools = tools.filter(
+          (t: any) => !(t.type === "mcp_toolset" && t.mcp_server_name === brokenServer)
+        );
+
+        await client.beta.agents.update(agentId, {
+          version,
+          mcp_servers: updatedServers,
+          tools: updatedTools,
+        });
+
+        // Create a new session without the broken MCP and retry
+        const task = getTask(taskId);
+        let retryVaultIds: string[] = [];
+        try {
+          const { getSetting } = await import("@/lib/db");
+          const vid = getSetting("mcp_vault_id");
+          if (vid) retryVaultIds = [vid];
+        } catch {}
+        const newSession = await client.beta.sessions.create({
+          agent: agentId,
+          environment_id: task?.environment_id || (agent as any).environment_id,
+          ...(retryVaultIds.length > 0 && { vault_ids: retryVaultIds }),
+        });
+
+        updateTask(taskId, { session_id: newSession.id });
+
+        return runAgentTask(
+          client,
+          newSession.id,
+          message,
+          taskId,
+          agentId,
+          retryCount + 1
+        );
+      } catch (retryErr) {
+        const retryMsg = retryErr instanceof Error ? retryErr.message : "Retry failed";
+        updateTask(taskId, {
+          status: "failed",
+          result: `Removed broken MCP "${brokenServer}" but retry failed: ${retryMsg}`,
+        });
+      }
+      return;
+    }
+
+    updateTask(taskId, { status: "failed", result: `Agent failed: ${msg}` });
+  }
+}
+
+async function streamAgentResponse(
+  client: any,
+  sessionId: string,
+  message: string
+): Promise<string> {
+  const streamPromise = (client.beta as any).sessions.events.stream(sessionId);
+
+  await (client.beta as any).sessions.events.send(sessionId, {
+    events: [
+      {
+        type: "user.message",
+        content: [{ type: "text", text: message }],
+      },
+    ],
+  });
+
+  const stream = await streamPromise;
+  const chunks: string[] = [];
+  const TIMEOUT_MS = 180_000;
+  const start = Date.now();
+  let sawRunning = false;
+
+  try {
+    for await (const ev of stream as AsyncIterable<any>) {
+      if (Date.now() - start > TIMEOUT_MS) break;
+
+      if (ev?.type === "session.status_running") sawRunning = true;
+
+      if (ev?.type === "agent.message" && Array.isArray(ev.content)) {
+        for (const block of ev.content) {
+          if (block?.type === "text" && typeof block.text === "string") {
+            chunks.push(block.text);
+          }
+        }
+      }
+
+      if (ev?.type === "session.status_idle" && sawRunning) break;
+      if (ev?.type === "session.error") {
+        const errDetail =
+          ev?.error?.message || ev?.message || ev?.description || JSON.stringify(ev?.error || ev);
+        throw new Error(errDetail);
+      }
+      if (ev?.type === "session.deleted") break;
+    }
+  } finally {
+    try { (stream as any)?.controller?.abort?.(); } catch { /* ignore */ }
+  }
+
+  return chunks.join("");
 }

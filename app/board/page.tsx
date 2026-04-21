@@ -30,13 +30,16 @@ export default function BoardPage() {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
-  // Pause polling while a task is transitioning to prevent reverting optimistic updates
-  const pausePollingRef = useRef(false);
   const [newDesc, setNewDesc] = useState("");
   const [newAgentId, setNewAgentId] = useState("");
   const [newEnvId, setNewEnvId] = useState("");
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState("");
+  // Track tasks that are transitioning - polling won't overwrite these
+  const pendingTasksRef = useRef<Set<number>>(new Set());
+  const [agentDetails, setAgentDetails] = useState<Record<string, {
+    name: string; mcpServers?: string[]; skills?: string[]; routines?: string[];
+  }>>({});
   const searchParams = useSearchParams();
 
   // Open modal when navigating with ?add=1 (from command palette / keyboard shortcut)
@@ -49,10 +52,28 @@ export default function BoardPage() {
   }, [searchParams]);
 
   const fetchTasks = useCallback(async () => {
-    if (pausePollingRef.current) return;
     try {
       const res = await fetch("/api/board");
-      if (res.ok) setTasks(await res.json());
+      if (res.ok) {
+        const serverTasks: BoardTask[] = await res.json();
+        setTasks((prev) =>
+          serverTasks.map((st) => {
+            // If this task is pending (just started), keep the optimistic status
+            // unless the server has moved past it (done/failed)
+            if (pendingTasksRef.current.has(st.id)) {
+              if (st.status === "in_progress" || st.status === "done" || st.status === "failed") {
+                // Server caught up, remove from pending
+                pendingTasksRef.current.delete(st.id);
+                return st;
+              }
+              // Server still shows todo - keep our optimistic in_progress
+              const optimistic = prev.find((t) => t.id === st.id);
+              return optimistic || st;
+            }
+            return st;
+          })
+        );
+      }
     } catch { /* ignore */ }
   }, []);
 
@@ -61,7 +82,7 @@ export default function BoardPage() {
     const preselectedAgent = searchParams.get("agent");
     fetch("/api/agents")
       .then((r) => (r.ok ? r.json() : []))
-      .then((data: Agent[]) => {
+      .then(async (data: Agent[]) => {
         const list = Array.isArray(data) ? data : [];
         setAgents(list);
         if (preselectedAgent && list.some((a) => a.id === preselectedAgent)) {
@@ -69,6 +90,37 @@ export default function BoardPage() {
         } else if (list.length > 0) {
           setNewAgentId(list[0].id);
         }
+
+        // Fetch details for each agent (MCP servers, skills, routines)
+        const details: typeof agentDetails = {};
+        for (const agent of list) {
+          const info: { name: string; mcpServers?: string[]; skills?: string[]; routines?: string[] } = {
+            name: agent.name,
+          };
+          // MCP servers + skills are on the agent object
+          if (agent.mcp_servers?.length) {
+            info.mcpServers = agent.mcp_servers.map((s) => s.name || s.url);
+          }
+          if ((agent as any).skills?.length) {
+            info.skills = (agent as any).skills.map((s: any) => s.skill_id || s.name);
+          }
+          details[agent.id] = info;
+        }
+
+        // Fetch connected routines for each agent
+        try {
+          for (const agent of list) {
+            const rRes = await fetch(`/api/agents/${agent.id}/routines`);
+            if (rRes.ok) {
+              const routines = await rRes.json();
+              if (Array.isArray(routines) && routines.length > 0) {
+                details[agent.id].routines = routines.map((r: any) => r.routine_name);
+              }
+            }
+          }
+        } catch { /* ignore */ }
+
+        setAgentDetails(details);
       })
       .catch(() => {});
     fetch("/api/environments")
@@ -123,9 +175,9 @@ export default function BoardPage() {
     e.dataTransfer.dropEffect = "move";
   };
 
-  const handleStart = async (taskId: number) => {
-    // Pause polling so it doesn't revert optimistic update
-    pausePollingRef.current = true;
+  const handleStart = (taskId: number) => {
+    // Track this task as pending so polling doesn't revert it
+    pendingTasksRef.current.add(taskId);
 
     // Optimistic update - move to in_progress immediately
     setTasks((prev) =>
@@ -134,36 +186,32 @@ export default function BoardPage() {
       )
     );
 
-    try {
-      const res = await fetch(`/api/board/${taskId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "in_progress" }),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "Failed to start task");
-        const parsed = parseApiError(errText);
-        showToast(parsed.message, "error", parsed.action);
+    // Fire and forget - don't block the UI
+    fetch(`/api/board/${taskId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: "in_progress" }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const errText = await res.text().catch(() => "Failed to start task");
+          const parsed = parseApiError(errText);
+          showToast(parsed.message, "error", parsed.action);
+          setTasks((prev) =>
+            prev.map((t) =>
+              t.id === taskId ? { ...t, status: "todo" } : t
+            )
+          );
+        }
+      })
+      .catch(() => {
+        showToast("Failed to start task", "error");
         setTasks((prev) =>
           prev.map((t) =>
             t.id === taskId ? { ...t, status: "todo" } : t
           )
         );
-      }
-    } catch {
-      showToast("Failed to start task", "error");
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === taskId ? { ...t, status: "todo" } : t
-        )
-      );
-    }
-
-    // Resume polling after a delay
-    setTimeout(() => {
-      pausePollingRef.current = false;
-    }, 10000);
+      });
   };
 
   const createTask = async () => {
@@ -294,6 +342,8 @@ export default function BoardPage() {
                 task={task}
                 onDragStart={handleDragStart}
                 onStart={handleStart}
+                agentInfo={task.agent_id ? agentDetails[task.agent_id] : undefined}
+                envName={environments.find((e) => e.id === task.environment_id)?.name}
               />
             ))}
             {tasksByColumn(col.key).length === 0 && (

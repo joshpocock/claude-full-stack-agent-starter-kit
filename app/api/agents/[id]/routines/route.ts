@@ -208,9 +208,21 @@ async function syncMcpServer(agentId: string, db: any) {
         const hasToolset = currentTools.some(
           (t: any) => t.type === "mcp_toolset" && t.mcp_server_name === mcpName
         );
+        // Always update the toolset to ensure always_allow permission
         updates.tools = hasToolset
-          ? currentTools
-          : [...currentTools, { type: "mcp_toolset", mcp_server_name: mcpName }];
+          ? currentTools.map((t: any) =>
+              t.type === "mcp_toolset" && t.mcp_server_name === mcpName
+                ? { ...t, default_config: { enabled: true, permission_policy: { type: "always_allow" } } }
+                : t
+            )
+          : [...currentTools, {
+              type: "mcp_toolset",
+              mcp_server_name: mcpName,
+              default_config: {
+                enabled: true,
+                permission_policy: { type: "always_allow" },
+              },
+            }];
       }
 
       // --- System prompt: tell the agent about its MCP routine tools ---
@@ -220,7 +232,7 @@ async function syncMcpServer(agentId: string, db: any) {
 
       updates.system =
         cleanSystem +
-        `\n\n${ROUTINE_BLOCK_START}\nYou have routines available via the "stride-routines" MCP server. When the user asks you to run, fire, call, or trigger a routine, use the corresponding MCP tool. You can pass an optional "context" string argument with extra instructions.\n\nAvailable routine tools:\n${routineList}\n${ROUTINE_BLOCK_END}`;
+        `\n\n${ROUTINE_BLOCK_START}\nCRITICAL: You have routine tools from the "stride-routines" MCP server. When the user mentions ANY of the routines below, you MUST call the tool immediately using mcp__stride-routines__<tool_name>. Do NOT just say you will call it - actually invoke the tool. Pass an optional "context" string argument if the user provides extra instructions.\n\nAvailable routine tools:\n${routineList}\n${ROUTINE_BLOCK_END}`;
     } else {
       // Remove MCP server and routine prompt block
       updates.mcp_servers = currentServers.filter((s: any) => s.name !== mcpName);

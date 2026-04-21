@@ -23,14 +23,25 @@ export async function GET(
     });
   }
 
-  if (!task.session_id) {
+  // Wait for session_id to be set (PATCH may still be creating the session)
+  let sessionId = task.session_id;
+  if (!sessionId) {
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const refreshed = getTask(taskId);
+      if (refreshed?.session_id) {
+        sessionId = refreshed.session_id;
+        break;
+      }
+    }
+  }
+
+  if (!sessionId) {
     return new Response(
       JSON.stringify({ error: "Task has no active session" }),
       { status: 400, headers: { "Content-Type": "application/json" } }
     );
   }
-
-  const sessionId = task.session_id;
 
   const stream = new ReadableStream({
     async start(controller) {
